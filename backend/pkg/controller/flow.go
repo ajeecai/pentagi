@@ -281,6 +281,7 @@ func LoadFlowWorker(ctx context.Context, flow database.Flow, fwc flowWorkerCtx) 
 	switch flow.Status {
 	case database.FlowStatusRunning, database.FlowStatusWaiting:
 	default:
+		// FlowStatusStopped and others are intentionally skipped on startup
 		return nil, fmt.Errorf("flow %d has status %s: loading aborted: %w", flow.ID, flow.Status, ErrNothingToLoad)
 	}
 
@@ -661,6 +662,10 @@ func (fw *flowWorker) Stop(ctx context.Context) error {
 	case <-timer.C:
 		return fmt.Errorf("task stop timeout")
 	case <-done:
+		// Mark flow as stopped in DB so it won't be auto-resumed on PentAGI restart
+		if err := fw.SetStatus(ctx, database.FlowStatusStopped); err != nil {
+			fw.logger.WithError(err).Warn("failed to set flow status to stopped")
+		}
 		return nil
 	}
 }

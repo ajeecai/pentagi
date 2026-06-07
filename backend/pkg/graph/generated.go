@@ -30664,13 +30664,27 @@ func (ec *executionContext) unmarshalInputAgentsConfigInput(ctx context.Context,
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"simple", "simpleJson", "primaryAgent", "assistant", "generator", "refiner", "adviser", "reflector", "searcher", "enricher", "coder", "installer", "pentester"}
+	fieldsInOrder := [...]string{"baseUrl", "apiKey", "simple", "simpleJson", "primaryAgent", "assistant", "generator", "refiner", "adviser", "reflector", "searcher", "enricher", "coder", "installer", "pentester"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
 			continue
 		}
 		switch k {
+		case "baseUrl":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("baseUrl"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.BaseURL = data
+		case "apiKey":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("apiKey"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.APIKey = data
 		case "simple":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("simple"))
 			data, err := ec.unmarshalNAgentConfigInput2ᚖpentagiᚋpkgᚋgraphᚋmodelᚐAgentConfig(ctx, v)

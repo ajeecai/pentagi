@@ -149,6 +149,7 @@ const (
 	FlowStatusCreated  FlowStatus = "created"
 	FlowStatusRunning  FlowStatus = "running"
 	FlowStatusWaiting  FlowStatus = "waiting"
+	FlowStatusStopped  FlowStatus = "stopped"
 	FlowStatusFinished FlowStatus = "finished"
 	FlowStatusFailed   FlowStatus = "failed"
 )

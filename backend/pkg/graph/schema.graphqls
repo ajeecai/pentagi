@@ -778,6 +778,8 @@ input AgentConfigInput {
 
 # Input type for AgentsConfig
 input AgentsConfigInput {
+  baseUrl: String
+  apiKey: String
   simple: AgentConfigInput!
   simpleJson: AgentConfigInput!
   primaryAgent: AgentConfigInput!
