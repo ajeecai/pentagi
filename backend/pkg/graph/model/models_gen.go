@@ -80,6 +80,8 @@ type AgentTypeUsageStats struct {
 }
 
 type AgentsConfig struct {
+	BaseURL      *string      `json:"baseUrl"`
+	APIKey       *string      `json:"apiKey"`
 	Simple       *AgentConfig `json:"simple"`
 	SimpleJSON   *AgentConfig `json:"simpleJson"`
 	PrimaryAgent *AgentConfig `json:"primaryAgent"`

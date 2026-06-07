@@ -559,7 +559,7 @@ func ConvertProviderConfigToGqlModel(cfg *pconfig.ProviderConfig) *model.AgentsC
 		return nil
 	}
 
-	return &model.AgentsConfig{
+	result := &model.AgentsConfig{
 		Simple:       ConvertAgentConfigToGqlModel(cfg.Simple),
 		SimpleJSON:   ConvertAgentConfigToGqlModel(cfg.SimpleJSON),
 		PrimaryAgent: ConvertAgentConfigToGqlModel(cfg.PrimaryAgent),
@@ -574,6 +574,13 @@ func ConvertProviderConfigToGqlModel(cfg *pconfig.ProviderConfig) *model.AgentsC
 		Installer:    ConvertAgentConfigToGqlModel(cfg.Installer),
 		Pentester:    ConvertAgentConfigToGqlModel(cfg.Pentester),
 	}
+	if cfg.BaseURL != "" {
+		result.BaseURL = &cfg.BaseURL
+	}
+	if cfg.APIKey != "" {
+		result.APIKey = &cfg.APIKey
+	}
+	return result
 }
 
 func ConvertAgentConfigToGqlModel(ac *pconfig.AgentConfig) *model.AgentConfig {
@@ -658,6 +665,12 @@ func ConvertAgentsConfigFromGqlModel(cfg *model.AgentsConfig) *pconfig.ProviderC
 		Coder:        ConvertAgentConfigFromGqlModel(cfg.Coder),
 		Installer:    ConvertAgentConfigFromGqlModel(cfg.Installer),
 		Pentester:    ConvertAgentConfigFromGqlModel(cfg.Pentester),
+	}
+	if cfg.BaseURL != nil {
+		pc.BaseURL = *cfg.BaseURL
+	}
+	if cfg.APIKey != nil {
+		pc.APIKey = *cfg.APIKey
 	}
 
 	rawConfig, err := json.Marshal(pc)
