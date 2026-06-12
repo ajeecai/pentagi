@@ -130,9 +130,7 @@ func applySubtaskOperations(
 				return nil, err
 			}
 			if op.Description == "" {
-				err := fmt.Errorf("operation %d: add operation missing required description field", i)
-				opLogger.Error(err.Error())
-				return nil, err
+				op.Description = op.Title // Default description to title if missing due to omitempty
 			}
 
 			newSubtask := tools.SubtaskInfoPatch{
@@ -274,8 +272,11 @@ func fixSubtaskPatch(planned []database.Subtask, patch tools.SubtaskPatch) tools
 	for _, op := range patch.Operations {
 		switch op.Op {
 		case tools.SubtaskOpAdd:
-			if op.Title == "" || op.Description == "" {
+			if op.Title == "" {
 				continue
+			}
+			if op.Description == "" {
+				op.Description = op.Title
 			}
 			newPatch.Operations = append(newPatch.Operations, tools.SubtaskOperation{
 				Op:          op.Op,
@@ -344,9 +345,7 @@ func ValidateSubtaskPatch(patch tools.SubtaskPatch) error {
 			if op.Title == "" {
 				return fmt.Errorf("operation %d: add requires title", i)
 			}
-			if op.Description == "" {
-				return fmt.Errorf("operation %d: add requires description", i)
-			}
+			// description is omitempty in JSON schema, so LLM may omit it — allow empty
 		case tools.SubtaskOpRemove:
 			if op.ID == nil {
 				return fmt.Errorf("operation %d: remove requires id", i)
