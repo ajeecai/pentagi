@@ -64,13 +64,6 @@ func New(
 ) (provider.Provider, error) {
 	baseKey := cfg.LLMServerKey
 	baseURL := cfg.LLMServerURL
-	// Per-provider credentials stored in DB take precedence over global env vars
-	if providerConfig.APIKey != "" {
-		baseKey = providerConfig.APIKey
-	}
-	if providerConfig.BaseURL != "" {
-		baseURL = providerConfig.BaseURL
-	}
 	baseModel := cfg.LLMServerModel
 	httpClient, err := system.GetHTTPClient(cfg)
 	if err != nil {

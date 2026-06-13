@@ -322,51 +322,12 @@ func (fc *flowController) GetFlow(ctx context.Context, flowID int64) (FlowWorker
 	fc.mx.Lock()
 	defer fc.mx.Unlock()
 
-	fw, ok := fc.flows[flowID]
-	if ok {
-		return fw, nil
-	}
-
-	// Flow not in memory — check if it's stopped and load it on demand for resume
-	dbFlow, err := fc.db.GetFlow(ctx, flowID)
-	if err != nil {
-		return nil, ErrFlowNotFound
-	}
-	if dbFlow.Status != database.FlowStatusStopped {
+	flow, ok := fc.flows[flowID]
+	if !ok {
 		return nil, ErrFlowNotFound
 	}
 
-	// Temporarily set status to waiting so LoadFlowWorker accepts it
-	if _, err := fc.db.UpdateFlowStatus(ctx, database.UpdateFlowStatusParams{
-		ID:     dbFlow.ID,
-		Status: database.FlowStatusWaiting,
-	}); err != nil {
-		return nil, fmt.Errorf("failed to restore stopped flow %d: %w", flowID, err)
-	}
-	dbFlow.Status = database.FlowStatusWaiting
-
-	fw, err = LoadFlowWorker(ctx, dbFlow, flowWorkerCtx{
-		db:     fc.db,
-		cfg:    fc.cfg,
-		docker: fc.docker,
-		provs:  fc.provs,
-		subs:   fc.subs,
-		flowProviderControllers: flowProviderControllers{
-			mlc:  fc.mlc,
-			aslc: fc.aslc,
-			alc:  fc.alc,
-			slc:  fc.slc,
-			tlc:  fc.tlc,
-			vslc: fc.vslc,
-			sc:   fc.sc,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to load stopped flow %d: %w", flowID, err)
-	}
-
-	fc.flows[flowID] = fw
-	return fw, nil
+	return flow, nil
 }
 
 func (fc *flowController) StopFlow(ctx context.Context, flowID int64) error {

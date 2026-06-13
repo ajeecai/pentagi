@@ -55,7 +55,6 @@ type dockerClient struct {
 type DockerClient interface {
 	RunContainer(ctx context.Context, containerName string, containerType database.ContainerType,
 		flowID int64, config *container.Config, hostConfig *container.HostConfig) (database.Container, error)
-	StartContainer(ctx context.Context, containerID string, dbID int64) error
 	StopContainer(ctx context.Context, containerID string, dbID int64) error
 	RemoveContainer(ctx context.Context, containerID string, dbID int64) error
 	IsContainerRunning(ctx context.Context, containerID string) (bool, error)
@@ -364,25 +363,6 @@ func (dc *dockerClient) RunContainer(
 	updateContainerInfo(database.ContainerStatusRunning, containerID)
 
 	return dbContainer, nil
-}
-
-func (dc *dockerClient) StartContainer(ctx context.Context, containerID string, dbID int64) error {
-	logger := dc.logger.WithContext(ctx).WithField("local_id", containerID)
-	logger.Info("starting container")
-
-	if err := dc.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		return fmt.Errorf("container start failed: %w", err)
-	}
-
-	if _, err := dc.db.UpdateContainerStatus(ctx, database.UpdateContainerStatusParams{
-		Status: database.ContainerStatusRunning,
-		ID:     dbID,
-	}); err != nil {
-		return fmt.Errorf("database status update failed during container start: %w", err)
-	}
-
-	logger.Info("container started successfully")
-	return nil
 }
 
 func (dc *dockerClient) StopContainer(ctx context.Context, containerID string, dbID int64) error {

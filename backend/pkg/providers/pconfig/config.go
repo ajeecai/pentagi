@@ -214,8 +214,6 @@ type AgentConfig struct {
 
 // ProviderConfig represents the configuration for all agents
 type ProviderConfig struct {
-	BaseURL        string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	APIKey         string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
 	Simple         *AgentConfig      `json:"simple,omitempty" yaml:"simple,omitempty"`
 	SimpleJSON     *AgentConfig      `json:"simple_json,omitempty" yaml:"simple_json,omitempty"`
 	PrimaryAgent   *AgentConfig      `json:"primary_agent,omitempty" yaml:"primary_agent,omitempty"`
