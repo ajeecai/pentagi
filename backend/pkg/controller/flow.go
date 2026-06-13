@@ -648,26 +648,23 @@ func (fw *flowWorker) Stop(ctx context.Context) error {
 	fw.taskMX.Lock()
 	defer fw.taskMX.Unlock()
 
+	// Cancel the subtask context and the flow goroutine context simultaneously.
 	fw.taskST()
-	done := make(chan struct{})
-	timer := time.NewTimer(stopTaskTimeout)
-	defer timer.Stop()
+	fw.cancel()
 
-	go func() {
-		fw.taskWG.Wait()
-		close(done)
-	}()
+	// Wait for the flow goroutine to fully exit before releasing the container.
+	fw.wg.Wait()
 
-	select {
-	case <-timer.C:
-		return fmt.Errorf("task stop timeout")
-	case <-done:
-		// Mark flow as stopped in DB so it won't be auto-resumed on PentAGI restart
-		if err := fw.SetStatus(ctx, database.FlowStatusStopped); err != nil {
-			fw.logger.WithError(err).Warn("failed to set flow status to stopped")
-		}
-		return nil
+	// Release (remove) the Kali container.
+	// On resume, LoadFlowWorker → Prepare() will create a fresh container.
+	if err := fw.flowCtx.Executor.Release(ctx); err != nil {
+		fw.logger.WithError(err).Warn("failed to release container after stop")
 	}
+
+	if err := fw.SetStatus(ctx, database.FlowStatusStopped); err != nil {
+		fw.logger.WithError(err).Warn("failed to set flow status to stopped")
+	}
+	return nil
 }
 
 func (fw *flowWorker) Rename(ctx context.Context, title string) error {
@@ -799,19 +796,28 @@ func (fw *flowWorker) worker() {
 	}
 
 	// process user input in regular job
-	for flin := range fw.input {
-		if task, err := fw.processInput(flin); err != nil {
-			if errors.Is(err, context.Canceled) {
-				getLogger(flin.input, task).Info("flow are going to be stopped by user")
+	for {
+		select {
+		case <-fw.ctx.Done():
+			// Flow context cancelled (e.g. Stop() called) — exit the goroutine.
+			return
+		case flin, ok := <-fw.input:
+			if !ok {
 				return
-			} else {
-				getLogger(flin.input, task).WithError(err).Error("failed to process input")
-
-				// anyway there need to set flow status to Waiting new user input even an error happened
-				_ = fw.SetStatus(fw.ctx, database.FlowStatusWaiting)
 			}
-		} else {
-			getLogger(flin.input, task).Info("user input processed")
+			if task, err := fw.processInput(flin); err != nil {
+				if errors.Is(err, context.Canceled) {
+					getLogger(flin.input, task).Info("flow are going to be stopped by user")
+					return
+				} else {
+					getLogger(flin.input, task).WithError(err).Error("failed to process input")
+
+					// anyway there need to set flow status to Waiting new user input even an error happened
+					_ = fw.SetStatus(fw.ctx, database.FlowStatusWaiting)
+				}
+			} else {
+				getLogger(flin.input, task).Info("user input processed")
+			}
 		}
 	}
 }

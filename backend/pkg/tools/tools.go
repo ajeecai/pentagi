@@ -395,13 +395,20 @@ func (fte *flowToolsExecutor) SetGraphitiClient(client *graphiti.Client) {
 }
 
 func (fte *flowToolsExecutor) Prepare(ctx context.Context) error {
+	// Reuse existing container if truly running in Docker; clean up stale records otherwise.
 	if cnt, err := fte.db.GetFlowPrimaryContainer(ctx, fte.flowID); err == nil {
 		switch cnt.Status {
 		case database.ContainerStatusRunning:
-			fte.primaryID = cnt.ID
-			fte.primaryLID = cnt.LocalID.String
-			return nil
+			// Verify against Docker — DB may be stale after some unexpected cases.
+			if isRunning, checkErr := fte.docker.IsContainerRunning(ctx, cnt.LocalID.String); checkErr == nil && isRunning {
+				fte.primaryID = cnt.ID
+				fte.primaryLID = cnt.LocalID.String
+				return nil
+			}
+			logrus.WithContext(ctx).Warnf("primary container %s recorded as running in DB but not operational in docker, cleaning up...", cnt.LocalID.String)
+			fte.docker.RemoveContainer(ctx, cnt.LocalID.String, cnt.ID)
 		default:
+			// Container was stopped/removed; clean up before creating a fresh one.
 			fte.docker.RemoveContainer(ctx, cnt.LocalID.String, cnt.ID)
 		}
 	}

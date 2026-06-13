@@ -450,7 +450,7 @@ func (s *FlowService) PatchFlow(c *gin.Context) {
 
 	switch patchFlow.Action {
 	case "stop":
-		if err := fw.Stop(c); err != nil {
+		if err := s.fc.StopFlow(c, int64(flow.ID)); err != nil {
 			logger.FromContext(c).WithError(err).Errorf("error stopping flow")
 			response.Error(c, response.ErrInternal, err)
 			return

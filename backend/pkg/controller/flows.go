@@ -327,23 +327,31 @@ func (fc *flowController) GetFlow(ctx context.Context, flowID int64) (FlowWorker
 		return fw, nil
 	}
 
-	// Flow not in memory — check if it's stopped and load it on demand for resume
+	// Flow not in memory — load it if it's in a resumable state.
+	// This handles stopped flows: Stop() now exits the goroutine, so stopped flows
+	// are always out of memory and need to be reloaded via LoadFlowWorker.
 	dbFlow, err := fc.db.GetFlow(ctx, flowID)
 	if err != nil {
 		return nil, ErrFlowNotFound
 	}
-	if dbFlow.Status != database.FlowStatusStopped {
+
+	switch dbFlow.Status {
+	case database.FlowStatusRunning, database.FlowStatusWaiting, database.FlowStatusStopped:
+		// resumable — fall through to load
+	default:
 		return nil, ErrFlowNotFound
 	}
 
-	// Temporarily set status to waiting so LoadFlowWorker accepts it
-	if _, err := fc.db.UpdateFlowStatus(ctx, database.UpdateFlowStatusParams{
-		ID:     dbFlow.ID,
-		Status: database.FlowStatusWaiting,
-	}); err != nil {
-		return nil, fmt.Errorf("failed to restore stopped flow %d: %w", flowID, err)
+	// LoadFlowWorker only accepts running/waiting; restore stopped → waiting first
+	if dbFlow.Status == database.FlowStatusStopped {
+		if _, err := fc.db.UpdateFlowStatus(ctx, database.UpdateFlowStatusParams{
+			ID:     dbFlow.ID,
+			Status: database.FlowStatusWaiting,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to restore stopped flow %d: %w", flowID, err)
+		}
+		dbFlow.Status = database.FlowStatusWaiting
 	}
-	dbFlow.Status = database.FlowStatusWaiting
 
 	fw, err = LoadFlowWorker(ctx, dbFlow, flowWorkerCtx{
 		db:     fc.db,
@@ -362,7 +370,7 @@ func (fc *flowController) GetFlow(ctx context.Context, flowID int64) (FlowWorker
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load stopped flow %d: %w", flowID, err)
+		return nil, fmt.Errorf("failed to load flow %d: %w", flowID, err)
 	}
 
 	fc.flows[flowID] = fw
@@ -382,6 +390,9 @@ func (fc *flowController) StopFlow(ctx context.Context, flowID int64) error {
 	if err != nil {
 		return fmt.Errorf("failed to stop flow %d: %w", flowID, err)
 	}
+
+	// Remove from in-memory map so Resume via GetFlow creates a fresh worker with a new context.
+	delete(fc.flows, flowID)
 
 	return nil
 }
