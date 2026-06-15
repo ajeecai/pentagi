@@ -119,7 +119,7 @@ func main() {
 		log.Fatalf("Database dialect configuration failed: %v\n", err)
 	}
 
-	if err := goose.Up(db, "sql"); err != nil {
+	if err := goose.Up(db, "sql", goose.WithAllowMissing()); err != nil {
 		log.Fatalf("Schema migration execution failed: %v\n", err)
 	}
 
