@@ -336,19 +336,19 @@ func (fc *flowController) GetFlow(ctx context.Context, flowID int64) (FlowWorker
 	}
 
 	switch dbFlow.Status {
-	case database.FlowStatusRunning, database.FlowStatusWaiting, database.FlowStatusStopped:
+	case database.FlowStatusRunning, database.FlowStatusWaiting, database.FlowStatusStopped, database.FlowStatusFailed:
 		// resumable — fall through to load
 	default:
 		return nil, ErrFlowNotFound
 	}
 
-	// LoadFlowWorker only accepts running/waiting; restore stopped → waiting first
-	if dbFlow.Status == database.FlowStatusStopped {
+	// LoadFlowWorker only accepts running/waiting; restore stopped/failed → waiting first
+	if dbFlow.Status == database.FlowStatusStopped || dbFlow.Status == database.FlowStatusFailed {
 		if _, err := fc.db.UpdateFlowStatus(ctx, database.UpdateFlowStatusParams{
 			ID:     dbFlow.ID,
 			Status: database.FlowStatusWaiting,
 		}); err != nil {
-			return nil, fmt.Errorf("failed to restore stopped flow %d: %w", flowID, err)
+			return nil, fmt.Errorf("failed to restore flow %d: %w", flowID, err)
 		}
 		dbFlow.Status = database.FlowStatusWaiting
 	}
