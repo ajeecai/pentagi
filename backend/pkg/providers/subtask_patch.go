@@ -336,34 +336,3 @@ func fixSubtaskPatch(planned []database.Subtask, patch tools.SubtaskPatch) tools
 
 	return newPatch
 }
-
-// ValidateSubtaskPatch validates the operations in a SubtaskPatch
-func ValidateSubtaskPatch(patch tools.SubtaskPatch) error {
-	for i, op := range patch.Operations {
-		switch op.Op {
-		case tools.SubtaskOpAdd:
-			if op.Title == "" {
-				return fmt.Errorf("operation %d: add requires title", i)
-			}
-			// description is omitempty in JSON schema, so LLM may omit it — allow empty
-		case tools.SubtaskOpRemove:
-			if op.ID == nil {
-				return fmt.Errorf("operation %d: remove requires id", i)
-			}
-		case tools.SubtaskOpModify:
-			if op.ID == nil {
-				return fmt.Errorf("operation %d: modify requires id", i)
-			}
-			if op.Title == "" && op.Description == "" {
-				return fmt.Errorf("operation %d: modify requires at least title or description", i)
-			}
-		case tools.SubtaskOpReorder:
-			if op.ID == nil {
-				return fmt.Errorf("operation %d: reorder requires id", i)
-			}
-		default:
-			return fmt.Errorf("operation %d: unknown operation type %q", i, op.Op)
-		}
-	}
-	return nil
-}
