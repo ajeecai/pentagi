@@ -378,6 +378,7 @@ func (fc *flowController) GetFlow(ctx context.Context, flowID int64) (FlowWorker
 			slc:  fc.slc,
 			tlc:  fc.tlc,
 			vslc: fc.vslc,
+			tclc: fc.tclc,
 			sc:   fc.sc,
 		},
 	})
