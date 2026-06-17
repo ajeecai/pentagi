@@ -36,6 +36,7 @@ type Config struct {
 	DockerWorkDir                string `env:"DOCKER_WORK_DIR"`
 	DockerDefaultImage           string `env:"DOCKER_DEFAULT_IMAGE" envDefault:"debian:latest"`
 	DockerDefaultImageForPentest string `env:"DOCKER_DEFAULT_IMAGE_FOR_PENTEST" envDefault:"vxcontrol/kali-linux"`
+	DockerNetworkMode            string `env:"DOCKER_NETWORK_MODE"`
 	TerminalToolTimeout          int    `env:"TERMINAL_TOOL_TIMEOUT" envDefault:"1200"`
 
 	// === API Server Configuration ===

@@ -54,16 +54,17 @@ type containerPathStatResult struct {
 }
 
 type dockerClient struct {
-	db       database.Querier
-	logger   *logrus.Logger
-	dataDir  string
-	hostDir  string
-	client   *client.Client
-	inside   bool
-	defImage string
-	socket   string
-	network  string
-	publicIP string
+	db          database.Querier
+	logger      *logrus.Logger
+	dataDir     string
+	hostDir     string
+	client      *client.Client
+	inside      bool
+	defImage    string
+	socket      string
+	network     string
+	networkMode string // overrides container-level NetworkMode when set (e.g. "container:wg-sidecar")
+	publicIP    string
 }
 
 type DockerClient interface {
@@ -155,16 +156,17 @@ func NewDockerClient(ctx context.Context, db database.Querier, cfg *config.Confi
 	}).Debug("Docker client initialized")
 
 	return &dockerClient{
-		db:       db,
-		client:   cli,
-		dataDir:  dataDir,
-		hostDir:  hostDir,
-		logger:   logger,
-		inside:   inside,
-		defImage: defImage,
-		socket:   socket,
-		network:  netName,
-		publicIP: publicIP,
+		db:          db,
+		client:      cli,
+		dataDir:     dataDir,
+		hostDir:     hostDir,
+		logger:      logger,
+		inside:      inside,
+		defImage:    defImage,
+		socket:      socket,
+		network:     netName,
+		networkMode: cfg.DockerNetworkMode,
+		publicIP:    publicIP,
 	}, nil
 }
 
@@ -325,6 +327,17 @@ func (dc *dockerClient) RunContainer(
 				},
 			}
 		}
+	}
+
+	// networkMode override is applied last so it always wins over the bridge/host branches above.
+	// Any non-default NetworkMode (e.g. "container:<name>", "host") is incompatible with
+	// custom networkingConfig, a container-level Hostname, and port publishing, so clear all three.
+	if dc.networkMode != "" {
+		hostConfig.NetworkMode = container.NetworkMode(dc.networkMode)
+		networkingConfig = nil
+		config.Hostname = ""          // hostname conflicts with container network mode
+		hostConfig.PortBindings = nil // port publishing conflicts with container network mode
+		config.ExposedPorts = nil     // must clear together with PortBindings
 	}
 
 	resp, err := dc.client.ContainerCreate(ctx, config, hostConfig, networkingConfig, nil, containerName)
