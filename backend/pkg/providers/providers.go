@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"pentagi/pkg/config"
 	"pentagi/pkg/csum"
@@ -19,24 +21,16 @@ import (
 	"pentagi/pkg/docker"
 	"pentagi/pkg/graphiti"
 	obs "pentagi/pkg/observability"
+	"pentagi/pkg/observability/langfuse"
 	"pentagi/pkg/providers/anthropic"
-	"pentagi/pkg/providers/bedrock"
-	"pentagi/pkg/providers/custom"
-	"pentagi/pkg/providers/deepseek"
 	"pentagi/pkg/providers/embeddings"
-	"pentagi/pkg/providers/gemini"
-	"pentagi/pkg/providers/glm"
-	"pentagi/pkg/providers/kimi"
-	"pentagi/pkg/providers/ollama"
-	"pentagi/pkg/providers/openai"
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
-	"pentagi/pkg/providers/qwen"
 	"pentagi/pkg/providers/tester"
 	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
 
-	lru "github.com/hashicorp/golang-lru/v2/expirable"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/sirupsen/logrus"
 )
 
@@ -44,10 +38,16 @@ const deltaCallCounter = 10000
 
 const defaultTestParallelWorkersNumber = 16
 
-const (
-	summarizerCacheMaxSize = 1000
-	summarizerCacheTTL     = 4 * time.Hour
-)
+const summarizerCacheMaxSize = 100
+
+// newSummarizerCache creates a fixed-size LRU cache for summarizer results.
+// Using lru.Cache (non-expirable) instead of expirable.LRU avoids spawning a
+// per-instance background goroutine that would otherwise accumulate for every
+// short-lived flow/assistant provider.
+func newSummarizerCache() *lru.Cache[[32]byte, string] {
+	c, _ := lru.New[[32]byte, string](summarizerCacheMaxSize)
+	return c
+}
 
 const pentestDockerImage = "vxcontrol/kali-linux"
 
@@ -124,11 +124,14 @@ type ProviderController interface {
 		prvID int64,
 	) (database.Provider, error)
 
+	SeedDefaultProviders(ctx context.Context, userID int64) error
+
 	TestAgent(
 		ctx context.Context,
 		prvtype provider.ProviderType,
 		agentType pconfig.ProviderOptionsType,
 		config *pconfig.AgentConfig,
+		simple *pconfig.AgentConfig,
 	) (tester.AgentTestResults, error)
 	TestProvider(
 		ctx context.Context,
@@ -141,21 +144,46 @@ type providerController struct {
 	db             database.Querier
 	cfg            *config.Config
 	docker         docker.DockerClient
-	publicIP       string
-	dockerNetwork  string
 	embedder       embeddings.Embedder
 	graphitiClient *graphiti.Client
 
 	startCallNumber *atomic.Int64
-
-	defaultDockerImageForPentest string
 
 	summarizerAgent     csum.Summarizer
 	summarizerAssistant csum.Summarizer
 
 	defaultConfigs provider.ProvidersConfig
 
+	// defaultConfigErrors records, per provider type, why buildDefaultConfigs
+	// tolerated a load failure (type disabled + unreadable custom config path).
+	// patchProviderConfig surfaces this instead of a bare "not found" so a later
+	// CreateProvider/UpdateProvider attempt on that type reports the real root
+	// cause (e.g. a bad BEDROCK_CONFIG_PATH) rather than an ambiguous message
+	// that reads the same as "this provider type does not exist at all".
+	defaultConfigErrors map[provider.ProviderType]error
+
 	provider.Providers
+}
+
+func buildDefaultConfigs(
+	cfg *config.Config,
+) (provider.ProvidersConfig, map[provider.ProviderType]error, error) {
+	defaultConfigs := make(provider.ProvidersConfig)
+	skipReasons := make(map[provider.ProviderType]error)
+	for _, e := range providerRegistry {
+		config, err := e.NewConfig(cfg)
+		if err != nil {
+			// A returned error here aborts startup; tolerate it for disabled providers.
+			if !e.Enabled(cfg) {
+				logrus.WithError(err).Warnf("skipping config for disabled %s provider", e.Type)
+				skipReasons[e.Type] = err
+				continue
+			}
+			return nil, nil, fmt.Errorf("failed to create %s provider config: %w", e.Type, err)
+		}
+		defaultConfigs[e.Type] = config
+	}
+	return defaultConfigs, skipReasons, nil
 }
 
 func NewProviderController(
@@ -173,159 +201,31 @@ func NewProviderController(
 	}
 
 	providers := make(provider.Providers)
-	defaultConfigs := make(provider.ProvidersConfig)
 
-	if config, err := openai.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create openai provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderOpenAI] = config
+	defaultConfigs, defaultConfigErrors, err := buildDefaultConfigs(cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	if config, err := anthropic.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create anthropic provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderAnthropic] = config
+	if cfg.LLMServerURL != "" && cfg.LLMServerKey == "" {
+		logrus.Warn("custom provider disabled: LLM_SERVER_URL is set but LLM_SERVER_KEY is empty")
 	}
 
-	if config, err := gemini.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create gemini provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderGemini] = config
+	if notice := anthropic.CredentialsNotice(cfg); notice != "" {
+		logrus.Warn(notice)
 	}
 
-	if config, err := bedrock.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create bedrock provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderBedrock] = config
-	}
-
-	if config, err := ollama.DefaultProviderConfig(cfg); err != nil {
-		return nil, fmt.Errorf("failed to create ollama provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderOllama] = config
-	}
-
-	if config, err := custom.DefaultProviderConfig(cfg); err != nil {
-		return nil, fmt.Errorf("failed to create custom provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderCustom] = config
-	}
-
-	if config, err := deepseek.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create deepseek provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderDeepSeek] = config
-	}
-
-	if config, err := glm.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create glm provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderGLM] = config
-	}
-
-	if config, err := kimi.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create kimi provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderKimi] = config
-	}
-
-	if config, err := qwen.DefaultProviderConfig(); err != nil {
-		return nil, fmt.Errorf("failed to create qwen provider config: %w", err)
-	} else {
-		defaultConfigs[provider.ProviderQwen] = config
-	}
-
-	if cfg.OpenAIKey != "" {
-		p, err := openai.New(cfg, provider.DefaultProviderNameOpenAI, defaultConfigs[provider.ProviderOpenAI])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create openai provider: %w", err)
+	for _, e := range providerRegistry {
+		if !e.Enabled(cfg) {
+			continue
 		}
 
-		providers[provider.DefaultProviderNameOpenAI] = p
-	}
-
-	if cfg.AnthropicAPIKey != "" {
-		p, err := anthropic.New(cfg, provider.DefaultProviderNameAnthropic, defaultConfigs[provider.ProviderAnthropic])
+		p, err := e.New(cfg, e.Name, defaultConfigs[e.Type])
 		if err != nil {
-			return nil, fmt.Errorf("failed to create anthropic provider: %w", err)
+			return nil, fmt.Errorf("failed to create %s provider: %w", e.Type, err)
 		}
 
-		providers[provider.DefaultProviderNameAnthropic] = p
-	}
-
-	if cfg.GeminiAPIKey != "" {
-		p, err := gemini.New(cfg, provider.DefaultProviderNameGemini, defaultConfigs[provider.ProviderGemini])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create gemini provider: %w", err)
-		}
-
-		providers[provider.DefaultProviderNameGemini] = p
-	}
-
-	// Bedrock supports three authentication strategies:
-	// 1. Default AWS SDK auth (BedrockDefaultAuth=true)
-	// 2. Bearer token (BedrockBearerToken set)
-	// 3. Static credentials (BedrockAccessKey + BedrockSecretKey)
-	if cfg.BedrockDefaultAuth || cfg.BedrockBearerToken != "" ||
-		(cfg.BedrockAccessKey != "" && cfg.BedrockSecretKey != "") {
-		p, err := bedrock.New(cfg, provider.DefaultProviderNameBedrock, defaultConfigs[provider.ProviderBedrock])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create bedrock provider: %w", err)
-		}
-		providers[provider.DefaultProviderNameBedrock] = p
-	}
-
-	if cfg.OllamaServerURL != "" {
-		p, err := ollama.New(cfg, provider.DefaultProviderNameOllama, defaultConfigs[provider.ProviderOllama])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create ollama provider: %w", err)
-		}
-		providers[provider.DefaultProviderNameOllama] = p
-	}
-
-	if cfg.LLMServerURL != "" && (cfg.LLMServerModel != "" || cfg.LLMServerConfig != "") {
-		p, err := custom.New(cfg, provider.DefaultProviderNameCustom, defaultConfigs[provider.ProviderCustom])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create custom provider: %w", err)
-		}
-
-		providers[provider.DefaultProviderNameCustom] = p
-	}
-
-	if cfg.DeepSeekAPIKey != "" {
-		p, err := deepseek.New(cfg, provider.DefaultProviderNameDeepSeek, defaultConfigs[provider.ProviderDeepSeek])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create deepseek provider: %w", err)
-		}
-
-		providers[provider.DefaultProviderNameDeepSeek] = p
-	}
-
-	if cfg.GLMAPIKey != "" {
-		p, err := glm.New(cfg, provider.DefaultProviderNameGLM, defaultConfigs[provider.ProviderGLM])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create glm provider: %w", err)
-		}
-
-		providers[provider.DefaultProviderNameGLM] = p
-	}
-
-	if cfg.KimiAPIKey != "" {
-		p, err := kimi.New(cfg, provider.DefaultProviderNameKimi, defaultConfigs[provider.ProviderKimi])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create kimi provider: %w", err)
-		}
-
-		providers[provider.DefaultProviderNameKimi] = p
-	}
-
-	if cfg.QwenAPIKey != "" {
-		p, err := qwen.New(cfg, provider.DefaultProviderNameQwen, defaultConfigs[provider.ProviderQwen])
-		if err != nil {
-			return nil, fmt.Errorf("failed to create qwen provider: %w", err)
-		}
-
-		providers[provider.DefaultProviderNameQwen] = p
+		providers[e.Name] = p
 	}
 
 	summarizerAgent := csum.NewSummarizer(csum.SummarizerConfig{
@@ -360,26 +260,40 @@ func NewProviderController(
 		graphitiClient = &graphiti.Client{}
 	}
 
-	return &providerController{
+	pc := &providerController{
 		db:             db,
 		cfg:            cfg,
 		docker:         docker,
-		publicIP:       cfg.DockerPublicIP,
-		dockerNetwork:  cfg.DockerNetwork,
 		embedder:       embedder,
 		graphitiClient: graphitiClient,
 
 		startCallNumber: newAtomicInt64(0), // 0 means to make it random
 
-		defaultDockerImageForPentest: cfg.DockerDefaultImageForPentest,
-
 		summarizerAgent:     summarizerAgent,
 		summarizerAssistant: summarizerAssistant,
 
-		defaultConfigs: defaultConfigs,
+		defaultConfigs:      defaultConfigs,
+		defaultConfigErrors: defaultConfigErrors,
 
 		Providers: providers,
-	}, nil
+	}
+
+	// Seed configured system providers into the DB for all existing users so
+	// they are immediately available without any UI interaction. This runs on
+	// every startup, so editing a YAML config file and restarting PentAGI
+	// automatically propagates new values.
+	ctx := context.Background()
+	if users, err := db.GetUsers(ctx); err != nil {
+		logrus.WithError(err).Warn("failed to fetch users for provider seeding")
+	} else {
+		for _, u := range users {
+			if err := pc.SeedDefaultProviders(ctx, u.ID); err != nil {
+				logrus.WithError(err).Warnf("failed to seed default providers for user %d", u.ID)
+			}
+		}
+	}
+
+	return pc, nil
 }
 
 func (pc *providerController) NewFlowProvider(
@@ -399,21 +313,33 @@ func (pc *providerController) NewFlowProvider(
 		return nil, fmt.Errorf("failed to get provider: %w", err)
 	}
 
-	imageTmpl, err := prompter.RenderTemplate(templates.PromptTypeImageChooser, map[string]any{
-		"DefaultImage":           pc.docker.GetDefaultImage(),
-		"DefaultImageForPentest": pc.defaultDockerImageForPentest,
-		"Input":                  input,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get primary docker image template: %w", err)
-	}
+	policy := newImagePolicy(pc.cfg, pc.docker.GetDefaultImage())
 
-	image, err := prv.Call(ctx, pconfig.OptionsTypeSimple, imageTmpl)
-	if err != nil {
-		return nil, fmt.Errorf("failed to select primary docker image via llm call: %w", err)
+	image := policy.pentestImage()
+	if !policy.skipsModel() {
+		imageTmpl, err := prompter.RenderTemplate(templates.PromptTypeImageChooser, map[string]any{
+			"DefaultImage":           pc.docker.GetDefaultImage(),
+			"DefaultImageForPentest": pc.cfg.DockerDefaultImageForPentest,
+			"Input":                  input,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get primary docker image template: %w", err)
+		}
+
+		answer, err := callWithSetupRetries(ctx, prv, pconfig.OptionsTypeSimple, imageTmpl)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select primary docker image via llm call: %w", err)
+		}
+
+		var rejected bool
+		if image, rejected = policy.resolve(answer); rejected {
+			logrus.WithFields(logrus.Fields{
+				"flow_id":  flowID,
+				"answer":   strings.TrimSpace(answer),
+				"fallback": image,
+			}).Warn("docker image chosen by the model was rejected, falling back")
+		}
 	}
-	image = strings.ToLower(strings.TrimSpace(image))
-	image = strings.Trim(image, "`")
 
 	languageTmpl, err := prompter.RenderTemplate(templates.PromptTypeLanguageChooser, map[string]any{
 		"Input": input,
@@ -422,7 +348,7 @@ func (pc *providerController) NewFlowProvider(
 		return nil, fmt.Errorf("failed to get language template: %w", err)
 	}
 
-	language, err := prv.Call(ctx, pconfig.OptionsTypeSimple, languageTmpl)
+	language, err := callWithSetupRetries(ctx, prv, pconfig.OptionsTypeSimple, languageTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get language: %w", err)
 	}
@@ -438,11 +364,11 @@ func (pc *providerController) NewFlowProvider(
 		return nil, fmt.Errorf("failed to get flow title template: %w", err)
 	}
 
-	title, err := prv.Call(ctx, pconfig.OptionsTypeSimple, titleTmpl)
+	title, err := callWithSetupRetries(ctx, prv, pconfig.OptionsTypeSimple, titleTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get flow title: %w", err)
 	}
-	title = strings.TrimSpace(title)
+	title = normalizeTitle(title)
 
 	tcIDTemplate, err := prv.GetToolCallIDTemplate(ctx, prompter)
 	if err != nil {
@@ -452,23 +378,21 @@ func (pc *providerController) NewFlowProvider(
 	fp := &flowProvider{
 		db:              pc.db,
 		mx:              &sync.RWMutex{},
+		cfg:             pc.cfg,
 		embedder:        pc.embedder,
 		graphitiClient:  pc.graphitiClient,
 		flowID:          flowID,
-		dataDir:         pc.cfg.DataDir,
-		publicIP:        pc.publicIP,
-		dockerNetwork:   pc.dockerNetwork,
 		callCounter:     newAtomicInt64(pc.startCallNumber.Add(deltaCallCounter)),
 		image:           image,
 		title:           title,
 		language:        language,
 		askUser:         askUser,
 		planning:        pc.cfg.AgentPlanningStepEnabled,
-		tcIDTemplate:    tcIDTemplate,
+		tcIDTemplate:    toolCallIDTemplateOrDefault(tcIDTemplate),
 		prompter:        prompter,
 		executor:        executor,
 		summarizer:      pc.summarizerAgent,
-		summarizerCache: lru.NewLRU[[32]byte, string](summarizerCacheMaxSize, nil, summarizerCacheTTL),
+		summarizerCache: newSummarizerCache(),
 		Provider:        prv,
 		maxGACallsLimit: pc.cfg.MaxGeneralAgentToolCalls,
 		maxLACallsLimit: pc.cfg.MaxLimitedAgentToolCalls,
@@ -504,23 +428,21 @@ func (pc *providerController) LoadFlowProvider(
 	fp := &flowProvider{
 		db:              pc.db,
 		mx:              &sync.RWMutex{},
+		cfg:             pc.cfg,
 		embedder:        pc.embedder,
 		graphitiClient:  pc.graphitiClient,
 		flowID:          flowID,
-		dataDir:         pc.cfg.DataDir,
-		publicIP:        pc.publicIP,
-		dockerNetwork:   pc.dockerNetwork,
 		callCounter:     newAtomicInt64(pc.startCallNumber.Add(deltaCallCounter)),
 		image:           image,
 		title:           title,
 		language:        language,
 		askUser:         askUser,
 		planning:        pc.cfg.AgentPlanningStepEnabled,
-		tcIDTemplate:    tcIDTemplate,
+		tcIDTemplate:    toolCallIDTemplateOrDefault(tcIDTemplate),
 		prompter:        prompter,
 		executor:        executor,
 		summarizer:      pc.summarizerAgent,
-		summarizerCache: lru.NewLRU[[32]byte, string](summarizerCacheMaxSize, nil, summarizerCacheTTL),
+		summarizerCache: newSummarizerCache(),
 		Provider:        prv,
 		maxGACallsLimit: pc.cfg.MaxGeneralAgentToolCalls,
 		maxLACallsLimit: pc.cfg.MaxLimitedAgentToolCalls,
@@ -568,7 +490,7 @@ func (pc *providerController) NewAssistantProvider(
 		return nil, fmt.Errorf("failed to get language template: %w", err)
 	}
 
-	language, err := prv.Call(ctx, pconfig.OptionsTypeSimple, languageTmpl)
+	language, err := callWithSetupRetries(ctx, prv, pconfig.OptionsTypeSimple, languageTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get language: %w", err)
 	}
@@ -584,11 +506,11 @@ func (pc *providerController) NewAssistantProvider(
 		return nil, fmt.Errorf("failed to get flow title template: %w", err)
 	}
 
-	title, err := prv.Call(ctx, pconfig.OptionsTypeSimple, titleTmpl)
+	title, err := callWithSetupRetries(ctx, prv, pconfig.OptionsTypeSimple, titleTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get flow title: %w", err)
 	}
-	title = strings.TrimSpace(title)
+	title = normalizeTitle(title)
 
 	tcIDTemplate, err := prv.GetToolCallIDTemplate(ctx, prompter)
 	if err != nil {
@@ -601,22 +523,20 @@ func (pc *providerController) NewAssistantProvider(
 		fp: flowProvider{
 			db:              pc.db,
 			mx:              &sync.RWMutex{},
+			cfg:             pc.cfg,
 			embedder:        pc.embedder,
 			graphitiClient:  pc.graphitiClient,
 			flowID:          flowID,
-			dataDir:         pc.cfg.DataDir,
-			publicIP:        pc.publicIP,
-			dockerNetwork:   pc.dockerNetwork,
 			callCounter:     newAtomicInt64(pc.startCallNumber.Add(deltaCallCounter)),
 			image:           image,
 			title:           title,
 			language:        language,
-			tcIDTemplate:    tcIDTemplate,
+			tcIDTemplate:    toolCallIDTemplateOrDefault(tcIDTemplate),
 			prompter:        prompter,
 			executor:        executor,
 			streamCb:        streamCb,
 			summarizer:      pc.summarizerAgent,
-			summarizerCache: lru.NewLRU[[32]byte, string](summarizerCacheMaxSize, nil, summarizerCacheTTL),
+			summarizerCache: newSummarizerCache(),
 			Provider:        prv,
 			maxGACallsLimit: pc.cfg.MaxGeneralAgentToolCalls,
 			maxLACallsLimit: pc.cfg.MaxLimitedAgentToolCalls,
@@ -656,22 +576,20 @@ func (pc *providerController) LoadAssistantProvider(
 		fp: flowProvider{
 			db:              pc.db,
 			mx:              &sync.RWMutex{},
+			cfg:             pc.cfg,
 			embedder:        pc.embedder,
 			graphitiClient:  pc.graphitiClient,
 			flowID:          flowID,
-			dataDir:         pc.cfg.DataDir,
-			publicIP:        pc.publicIP,
-			dockerNetwork:   pc.dockerNetwork,
 			callCounter:     newAtomicInt64(pc.startCallNumber.Add(deltaCallCounter)),
 			image:           image,
 			title:           title,
 			language:        language,
-			tcIDTemplate:    tcIDTemplate,
+			tcIDTemplate:    toolCallIDTemplateOrDefault(tcIDTemplate),
 			prompter:        prompter,
 			executor:        executor,
 			streamCb:        streamCb,
 			summarizer:      pc.summarizerAgent,
-			summarizerCache: lru.NewLRU[[32]byte, string](summarizerCacheMaxSize, nil, summarizerCacheTTL),
+			summarizerCache: newSummarizerCache(),
 			Provider:        prv,
 			maxGACallsLimit: pc.cfg.MaxGeneralAgentToolCalls,
 			maxLACallsLimit: pc.cfg.MaxLimitedAgentToolCalls,
@@ -701,6 +619,62 @@ func (pc *providerController) GetProvider(
 	prvname provider.ProviderName,
 	userID int64,
 ) (provider.Provider, error) {
+	prv, err := pc.resolveProvider(ctx, prvname, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return pc.withFallback(ctx, prv, userID), nil
+}
+
+func (pc *providerController) withFallback(
+	ctx context.Context,
+	primary provider.Provider,
+	userID int64,
+) provider.Provider {
+	name := provider.ProviderName(strings.TrimSpace(pc.cfg.LLMFallbackProvider))
+	if name == "" || name == primary.Name() {
+		return primary
+	}
+
+	backup, err := pc.resolveProvider(ctx, name, userID)
+	if err != nil {
+		logrus.WithContext(ctx).WithError(err).
+			Warnf("fallback provider '%s' does not resolve, calls will not switch", name)
+		return primary
+	}
+
+	return provider.WithFailover(primary, backup, func(
+		ctx context.Context, from, to provider.ProviderName, callErr error,
+	) {
+		logrus.WithContext(ctx).WithError(callErr).WithFields(logrus.Fields{
+			"from": from,
+			"to":   to,
+		}).Warn("provider call failed, repeating it on the fallback provider")
+
+		_, observation := obs.Observer.NewObservation(ctx)
+		observation.Event(
+			langfuse.WithEventName("provider failover"),
+			langfuse.WithEventInput(map[string]any{
+				"from": string(from),
+				"to":   string(to),
+			}),
+			langfuse.WithEventMetadata(langfuse.Metadata{
+				"from":    string(from),
+				"to":      string(to),
+				"user_id": userID,
+			}),
+			langfuse.WithEventLevel(langfuse.ObservationLevelWarning),
+			langfuse.WithEventStatus(callErr.Error()),
+		)
+	})
+}
+
+func (pc *providerController) resolveProvider(
+	ctx context.Context,
+	prvname provider.ProviderName,
+	userID int64,
+) (provider.Provider, error) {
 	// Lookup user defined providers first so they take precedence over built-in providers
 	prv, err := pc.db.GetUserProviderByName(ctx, database.GetUserProviderByNameParams{
 		Name:   string(prvname),
@@ -714,30 +688,7 @@ func (pc *providerController) GetProvider(
 	}
 
 	// Fall back to built-in default providers
-	switch prvname {
-	case provider.DefaultProviderNameOpenAI:
-		return pc.Providers.Get(provider.DefaultProviderNameOpenAI)
-	case provider.DefaultProviderNameAnthropic:
-		return pc.Providers.Get(provider.DefaultProviderNameAnthropic)
-	case provider.DefaultProviderNameGemini:
-		return pc.Providers.Get(provider.DefaultProviderNameGemini)
-	case provider.DefaultProviderNameBedrock:
-		return pc.Providers.Get(provider.DefaultProviderNameBedrock)
-	case provider.DefaultProviderNameOllama:
-		return pc.Providers.Get(provider.DefaultProviderNameOllama)
-	case provider.DefaultProviderNameCustom:
-		return pc.Providers.Get(provider.DefaultProviderNameCustom)
-	case provider.DefaultProviderNameDeepSeek:
-		return pc.Providers.Get(provider.DefaultProviderNameDeepSeek)
-	case provider.DefaultProviderNameGLM:
-		return pc.Providers.Get(provider.DefaultProviderNameGLM)
-	case provider.DefaultProviderNameKimi:
-		return pc.Providers.Get(provider.DefaultProviderNameKimi)
-	case provider.DefaultProviderNameQwen:
-		return pc.Providers.Get(provider.DefaultProviderNameQwen)
-	}
-
-	return nil, fmt.Errorf("provider '%s' not found", prvname)
+	return pc.Get(prvname)
 }
 
 func (pc *providerController) GetProviders(
@@ -760,7 +711,14 @@ func (pc *providerController) GetProviders(
 	for _, prv := range providers {
 		p, err := pc.NewProvider(prv)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build provider: %w", err)
+			// Any unbuildable saved provider (its type is disabled, or its stored
+			// config is stale/invalid) is skipped, not propagated — one bad row must
+			// not take down the whole list. Logged at Warn (not Error) since this is
+			// an expected, recoverable condition (e.g. a type disabled via env vars),
+			// but it must stay visible in production logs rather than silently
+			// disappearing the provider from the list on every fetch.
+			logrus.WithError(err).Warnf("skipping unusable user provider '%s' (type '%s')", prv.Name, prv.Type)
+			continue
 		}
 		providersMap[provider.ProviderName(prv.Name)] = p
 	}
@@ -780,70 +738,80 @@ func (pc *providerController) NewProvider(prv database.Provider) (provider.Provi
 		return nil, fmt.Errorf("provider type '%s' is not available", prv.Type)
 	}
 
-	switch providerType {
-	case provider.ProviderOpenAI:
-		openaiConfig, err := openai.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build openai provider config: %w", err)
-		}
-		return openai.New(pc.cfg, providerName, openaiConfig)
-	case provider.ProviderAnthropic:
-		anthropicConfig, err := anthropic.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build anthropic provider config: %w", err)
-		}
-		return anthropic.New(pc.cfg, providerName, anthropicConfig)
-	case provider.ProviderGemini:
-		geminiConfig, err := gemini.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build gemini provider config: %w", err)
-		}
-		return gemini.New(pc.cfg, providerName, geminiConfig)
-	case provider.ProviderBedrock:
-		bedrockConfig, err := bedrock.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build bedrock provider config: %w", err)
-		}
-		return bedrock.New(pc.cfg, providerName, bedrockConfig)
-	case provider.ProviderOllama:
-		ollamaConfig, err := ollama.BuildProviderConfig(pc.cfg, prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build ollama provider config: %w", err)
-		}
-		return ollama.New(pc.cfg, providerName, ollamaConfig)
-	case provider.ProviderCustom:
-		customConfig, err := custom.BuildProviderConfig(pc.cfg, prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build custom provider config: %w", err)
-		}
-		return custom.New(pc.cfg, providerName, customConfig)
-	case provider.ProviderDeepSeek:
-		deepseekConfig, err := deepseek.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build deepseek provider config: %w", err)
-		}
-		return deepseek.New(pc.cfg, providerName, deepseekConfig)
-	case provider.ProviderGLM:
-		glmConfig, err := glm.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build glm provider config: %w", err)
-		}
-		return glm.New(pc.cfg, providerName, glmConfig)
-	case provider.ProviderKimi:
-		kimiConfig, err := kimi.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build kimi provider config: %w", err)
-		}
-		return kimi.New(pc.cfg, providerName, kimiConfig)
-	case provider.ProviderQwen:
-		qwenConfig, err := qwen.BuildProviderConfig(prv.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build qwen provider config: %w", err)
-		}
-		return qwen.New(pc.cfg, providerName, qwenConfig)
-	default:
+	e, ok := entryForType(providerType)
+	if !ok {
 		return nil, fmt.Errorf("unknown provider type: %s", prv.Type)
 	}
+
+	config, err := e.BuildConfig(pc.cfg, prv.Config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build %s provider config: %w", providerType, err)
+	}
+
+	return e.New(pc.cfg, providerName, config)
+}
+
+func (pc *providerController) SeedDefaultProviders(ctx context.Context, userID int64) error {
+	if pc.cfg.BedrockConfig == "" {
+		return nil
+	}
+	if !pc.cfg.BedrockDefaultAuth && pc.cfg.BedrockBearerToken == "" &&
+		(pc.cfg.BedrockAccessKey == "" || pc.cfg.BedrockSecretKey == "") {
+		return nil
+	}
+
+	bedrockCfg, ok := pc.defaultConfigs[provider.ProviderBedrock]
+	if !ok {
+		return nil
+	}
+
+	rawConfig, err := json.Marshal(bedrockCfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal bedrock config: %w", err)
+	}
+
+	prvname := bedrockCfg.Name
+	if prvname == "" {
+		prvname = string(provider.DefaultProviderNameBedrock)
+	}
+	existing, err := pc.db.GetUserProviderByName(ctx, database.GetUserProviderByNameParams{
+		Name:   prvname,
+		UserID: userID,
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("failed to get provider '%s' from database: %w", prvname, err)
+	}
+	if err != nil {
+		_, err = pc.db.CreateProvider(ctx, database.CreateProviderParams{
+			UserID: userID,
+			Type:   database.ProviderType(provider.ProviderBedrock),
+			Name:   prvname,
+			Config: rawConfig,
+		})
+		return err
+	}
+
+	_, err = pc.db.UpdateUserProvider(ctx, database.UpdateUserProviderParams{
+		ID:     existing.ID,
+		UserID: userID,
+		Config: rawConfig,
+		Name:   existing.Name,
+	})
+	return err
+}
+
+// MUST stay in sync with the frontend provider form schema (settings-provider.tsx).
+const maxProviderNameLen = 50
+
+func validateProviderName(prvname provider.ProviderName) (provider.ProviderName, error) {
+	trimmed := strings.TrimSpace(string(prvname))
+	if trimmed == "" {
+		return "", fmt.Errorf("provider name is required")
+	}
+	if utf8.RuneCountInString(trimmed) > maxProviderNameLen {
+		return "", fmt.Errorf("provider name must not exceed %d characters", maxProviderNameLen)
+	}
+	return provider.ProviderName(trimmed), nil
 }
 
 func (pc *providerController) CreateProvider(
@@ -861,8 +829,36 @@ func (pc *providerController) CreateProvider(
 		result database.Provider
 	)
 
+	if prvname, err = validateProviderName(prvname); err != nil {
+		return result, err
+	}
+
+	if !pc.ListTypes().Contains(prvtype) {
+		return result, fmt.Errorf("provider type '%s' is not available", prvtype)
+	}
+
 	if config, err = pc.patchProviderConfig(prvtype, config); err != nil {
 		return result, fmt.Errorf("failed to patch provider config: %w", err)
+	}
+
+	if err = config.Validate(); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateToolReasoning(prvtype.ReasoningProvider()); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateThinkingAgreement(prvtype.ReasoningProvider()); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateReasoningOff(prvtype.ReasoningProvider()); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateThinkingBudget(prvtype.ReasoningProvider(), ModelPrefix(pc.cfg, prvtype)); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
 	}
 
 	rawConfig, err := json.Marshal(config)
@@ -898,6 +894,10 @@ func (pc *providerController) UpdateProvider(
 		result database.Provider
 	)
 
+	if prvname, err = validateProviderName(prvname); err != nil {
+		return result, err
+	}
+
 	prv, err := pc.db.GetUserProvider(ctx, database.GetUserProviderParams{
 		ID:     prvID,
 		UserID: userID,
@@ -909,6 +909,26 @@ func (pc *providerController) UpdateProvider(
 
 	if config, err = pc.patchProviderConfig(prvtype, config); err != nil {
 		return result, fmt.Errorf("failed to patch provider config: %w", err)
+	}
+
+	if err = config.Validate(); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateToolReasoning(prvtype.ReasoningProvider()); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateThinkingAgreement(prvtype.ReasoningProvider()); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateReasoningOff(prvtype.ReasoningProvider()); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
+	}
+
+	if err = config.ValidateThinkingBudget(prvtype.ReasoningProvider(), ModelPrefix(pc.cfg, prvtype)); err != nil {
+		return result, fmt.Errorf("invalid provider config: %w", err)
 	}
 
 	rawConfig, err := json.Marshal(config)
@@ -953,6 +973,7 @@ func (pc *providerController) TestAgent(
 	prvtype provider.ProviderType,
 	agentType pconfig.ProviderOptionsType,
 	config *pconfig.AgentConfig,
+	simple *pconfig.AgentConfig,
 ) (tester.AgentTestResults, error) {
 	ctx, span := obs.Observer.NewSpan(ctx, obs.SpanKindInternal, "providers.TestAgent")
 	defer span.End()
@@ -992,6 +1013,10 @@ func (pc *providerController) TestAgent(
 		testConfig.Pentester = config
 	default:
 		return result, fmt.Errorf("unsupported agent type: %s", agentType)
+	}
+
+	if testConfig.Simple == nil {
+		testConfig.Simple = simple
 	}
 
 	// Patch with defaults
@@ -1101,6 +1126,12 @@ func (pc *providerController) patchProviderConfig(
 	)
 
 	if defaultCfg, ok = pc.defaultConfigs[prvtype]; !ok {
+		if reason, hasReason := pc.defaultConfigErrors[prvtype]; hasReason {
+			return nil, fmt.Errorf(
+				"provider type '%s' has no default config because it failed to load at startup: %w",
+				prvtype.String(), reason,
+			)
+		}
 		return nil, fmt.Errorf("default provider config not found for type: %s", prvtype.String())
 	}
 
@@ -1158,30 +1189,12 @@ func (pc *providerController) buildProviderFromConfig(
 	prvname provider.ProviderName,
 	config *pconfig.ProviderConfig,
 ) (provider.Provider, error) {
-	switch prvtype {
-	case provider.ProviderOpenAI:
-		return openai.New(pc.cfg, prvname, config)
-	case provider.ProviderAnthropic:
-		return anthropic.New(pc.cfg, prvname, config)
-	case provider.ProviderCustom:
-		return custom.New(pc.cfg, prvname, config)
-	case provider.ProviderGemini:
-		return gemini.New(pc.cfg, prvname, config)
-	case provider.ProviderBedrock:
-		return bedrock.New(pc.cfg, prvname, config)
-	case provider.ProviderOllama:
-		return ollama.New(pc.cfg, prvname, config)
-	case provider.ProviderDeepSeek:
-		return deepseek.New(pc.cfg, prvname, config)
-	case provider.ProviderGLM:
-		return glm.New(pc.cfg, prvname, config)
-	case provider.ProviderKimi:
-		return kimi.New(pc.cfg, prvname, config)
-	case provider.ProviderQwen:
-		return qwen.New(pc.cfg, prvname, config)
-	default:
+	e, ok := entryForType(prvtype)
+	if !ok {
 		return nil, fmt.Errorf("unknown provider type: %s", prvtype)
 	}
+
+	return e.New(pc.cfg, prvname, config)
 }
 
 func newAtomicInt64(seed int64) *atomic.Int64 {
@@ -1197,4 +1210,15 @@ func newAtomicInt64(seed int64) *atomic.Int64 {
 
 	number.Store(seed)
 	return &number
+}
+
+func callWithSetupRetries(
+	ctx context.Context,
+	prv provider.Provider,
+	opt pconfig.ProviderOptionsType,
+	prompt string,
+) (string, error) {
+	return retryTransient(ctx, delayBetweenRetries, func() (string, error) {
+		return prv.Call(ctx, opt, prompt)
+	})
 }

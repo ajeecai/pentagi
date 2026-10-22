@@ -35,18 +35,23 @@ type APITokenWithSecret struct {
 }
 
 type AgentConfig struct {
-	Model             string           `json:"model"`
-	MaxTokens         *int             `json:"maxTokens,omitempty"`
-	Temperature       *float64         `json:"temperature,omitempty"`
-	TopK              *int             `json:"topK,omitempty"`
-	TopP              *float64         `json:"topP,omitempty"`
-	MinLength         *int             `json:"minLength,omitempty"`
-	MaxLength         *int             `json:"maxLength,omitempty"`
-	RepetitionPenalty *float64         `json:"repetitionPenalty,omitempty"`
-	FrequencyPenalty  *float64         `json:"frequencyPenalty,omitempty"`
-	PresencePenalty   *float64         `json:"presencePenalty,omitempty"`
-	Reasoning         *ReasoningConfig `json:"reasoning,omitempty"`
-	Price             *ModelPrice      `json:"price,omitempty"`
+	Model             string                 `json:"model"`
+	MaxTokens         *int                   `json:"maxTokens,omitempty"`
+	Temperature       *float64               `json:"temperature,omitempty"`
+	TopK              *int                   `json:"topK,omitempty"`
+	TopP              *float64               `json:"topP,omitempty"`
+	MinLength         *int                   `json:"minLength,omitempty"`
+	MaxLength         *int                   `json:"maxLength,omitempty"`
+	RepetitionPenalty *float64               `json:"repetitionPenalty,omitempty"`
+	FrequencyPenalty  *float64               `json:"frequencyPenalty,omitempty"`
+	PresencePenalty   *float64               `json:"presencePenalty,omitempty"`
+	MinP              *float64               `json:"minP,omitempty"`
+	N                 *int                   `json:"n,omitempty"`
+	JSON              *bool                  `json:"json,omitempty"`
+	ResponseMimeType  *string                `json:"responseMimeType,omitempty"`
+	Reasoning         *ReasoningConfig       `json:"reasoning,omitempty"`
+	Price             *ModelPrice            `json:"price,omitempty"`
+	ExtraBody         map[string]interface{} `json:"extraBody,omitempty"`
 }
 
 type AgentLog struct {
@@ -77,24 +82,6 @@ type AgentTestResult struct {
 type AgentTypeUsageStats struct {
 	AgentType AgentType   `json:"agentType"`
 	Stats     *UsageStats `json:"stats"`
-}
-
-type AgentsConfig struct {
-	BaseURL      *string      `json:"baseUrl"`
-	APIKey       *string      `json:"apiKey"`
-	Simple       *AgentConfig `json:"simple"`
-	SimpleJSON   *AgentConfig `json:"simpleJson"`
-	PrimaryAgent *AgentConfig `json:"primaryAgent"`
-	Assistant    *AgentConfig `json:"assistant"`
-	Generator    *AgentConfig `json:"generator"`
-	Refiner      *AgentConfig `json:"refiner"`
-	Adviser      *AgentConfig `json:"adviser"`
-	Reflector    *AgentConfig `json:"reflector"`
-	Searcher     *AgentConfig `json:"searcher"`
-	Enricher     *AgentConfig `json:"enricher"`
-	Coder        *AgentConfig `json:"coder"`
-	Installer    *AgentConfig `json:"installer"`
-	Pentester    *AgentConfig `json:"pentester"`
 }
 
 type AgentsPrompts struct {
@@ -196,10 +183,14 @@ type DefaultProvidersConfig struct {
 	Glm       *ProviderConfig `json:"glm,omitempty"`
 	Kimi      *ProviderConfig `json:"kimi,omitempty"`
 	Qwen      *ProviderConfig `json:"qwen,omitempty"`
+	Minimax   *ProviderConfig `json:"minimax,omitempty"`
+	Mistral   *ProviderConfig `json:"mistral,omitempty"`
+	Xai       *ProviderConfig `json:"xai,omitempty"`
 }
 
 type Flow struct {
 	ID        int64       `json:"id"`
+	UserID    int64       `json:"userId"`
 	Title     string      `json:"title"`
 	Status    StatusType  `json:"status"`
 	Terminals []*Terminal `json:"terminals,omitempty"`
@@ -224,6 +215,7 @@ type FlowExecutionStats struct {
 
 type FlowFile struct {
 	ID         string    `json:"id"`
+	FlowID     int64     `json:"flowId"`
 	Name       string    `json:"name"`
 	Path       string    `json:"path"`
 	Size       int       `json:"size"`
@@ -314,11 +306,14 @@ type ModelAgentsUsageStats struct {
 }
 
 type ModelConfig struct {
-	Name        string      `json:"name"`
-	Description *string     `json:"description,omitempty"`
-	ReleaseDate *time.Time  `json:"releaseDate,omitempty"`
-	Thinking    *bool       `json:"thinking,omitempty"`
-	Price       *ModelPrice `json:"price,omitempty"`
+	Name            string              `json:"name"`
+	Description     *string             `json:"description,omitempty"`
+	ReleaseDate     *time.Time          `json:"releaseDate,omitempty"`
+	Thinking        *bool               `json:"thinking,omitempty"`
+	Reasoning       *ModelReasoningInfo `json:"reasoning,omitempty"`
+	Price           *ModelPrice         `json:"price,omitempty"`
+	ContextWindow   *int                `json:"contextWindow,omitempty"`
+	MaxOutputTokens *int                `json:"maxOutputTokens,omitempty"`
 }
 
 type ModelPrice struct {
@@ -326,6 +321,16 @@ type ModelPrice struct {
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cacheRead"`
 	CacheWrite float64 `json:"cacheWrite"`
+}
+
+type ModelReasoningInfo struct {
+	Mode                   *ModelReasoningMode `json:"mode,omitempty"`
+	Efforts                []ReasoningEffort   `json:"efforts,omitempty"`
+	Supported              *bool               `json:"supported,omitempty"`
+	CannotDisable          *bool               `json:"cannotDisable,omitempty"`
+	DefaultOn              *bool               `json:"defaultOn,omitempty"`
+	RejectsEffortWithTools *bool               `json:"rejectsEffortWithTools,omitempty"`
+	TakesNoThinkingDepth   *bool               `json:"takesNoThinkingDepth,omitempty"`
 }
 
 type ModelUsageStats struct {
@@ -403,6 +408,9 @@ type ProvidersModelsList struct {
 	Glm       []*ModelConfig `json:"glm,omitempty"`
 	Kimi      []*ModelConfig `json:"kimi,omitempty"`
 	Qwen      []*ModelConfig `json:"qwen,omitempty"`
+	Minimax   []*ModelConfig `json:"minimax,omitempty"`
+	Mistral   []*ModelConfig `json:"mistral,omitempty"`
+	Xai       []*ModelConfig `json:"xai,omitempty"`
 }
 
 type ProvidersReadinessStatus struct {
@@ -416,12 +424,16 @@ type ProvidersReadinessStatus struct {
 	Glm       bool `json:"glm"`
 	Kimi      bool `json:"kimi"`
 	Qwen      bool `json:"qwen"`
+	Minimax   bool `json:"minimax"`
+	Mistral   bool `json:"mistral"`
+	Xai       bool `json:"xai"`
 }
 
 type Query struct {
 }
 
 type ReasoningConfig struct {
+	Mode      *ReasoningMode   `json:"mode,omitempty"`
 	Effort    *ReasoningEffort `json:"effort,omitempty"`
 	MaxTokens *int             `json:"maxTokens,omitempty"`
 }
@@ -629,6 +641,16 @@ type VectorStoreLog struct {
 	TaskID    *int64            `json:"taskId,omitempty"`
 	SubtaskID *int64            `json:"subtaskId,omitempty"`
 	CreatedAt time.Time         `json:"createdAt"`
+}
+
+type VersionInfo struct {
+	Current   string      `json:"current"`
+	Build     string      `json:"build"`
+	State     UpdateState `json:"state"`
+	Latest    *string     `json:"latest,omitempty"`
+	Strategy  string      `json:"strategy"`
+	CheckedAt *time.Time  `json:"checkedAt,omitempty"`
+	FailedAt  *time.Time  `json:"failedAt,omitempty"`
 }
 
 type AgentConfigType string
@@ -959,6 +981,49 @@ func (e MessageLogType) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
+type ModelReasoningMode string
+
+const (
+	ModelReasoningModeBudget       ModelReasoningMode = "budget"
+	ModelReasoningModeAdaptive     ModelReasoningMode = "adaptive"
+	ModelReasoningModeAdaptiveOnly ModelReasoningMode = "adaptive_only"
+)
+
+var AllModelReasoningMode = []ModelReasoningMode{
+	ModelReasoningModeBudget,
+	ModelReasoningModeAdaptive,
+	ModelReasoningModeAdaptiveOnly,
+}
+
+func (e ModelReasoningMode) IsValid() bool {
+	switch e {
+	case ModelReasoningModeBudget, ModelReasoningModeAdaptive, ModelReasoningModeAdaptiveOnly:
+		return true
+	}
+	return false
+}
+
+func (e ModelReasoningMode) String() string {
+	return string(e)
+}
+
+func (e *ModelReasoningMode) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = ModelReasoningMode(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid ModelReasoningMode", str)
+	}
+	return nil
+}
+
+func (e ModelReasoningMode) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
 type PromptType string
 
 const (
@@ -1136,6 +1201,9 @@ const (
 	ProviderTypeGlm       ProviderType = "glm"
 	ProviderTypeKimi      ProviderType = "kimi"
 	ProviderTypeQwen      ProviderType = "qwen"
+	ProviderTypeMinimax   ProviderType = "minimax"
+	ProviderTypeMistral   ProviderType = "mistral"
+	ProviderTypeXai       ProviderType = "xai"
 )
 
 var AllProviderType = []ProviderType{
@@ -1149,11 +1217,14 @@ var AllProviderType = []ProviderType{
 	ProviderTypeGlm,
 	ProviderTypeKimi,
 	ProviderTypeQwen,
+	ProviderTypeMinimax,
+	ProviderTypeMistral,
+	ProviderTypeXai,
 }
 
 func (e ProviderType) IsValid() bool {
 	switch e {
-	case ProviderTypeOpenai, ProviderTypeAnthropic, ProviderTypeGemini, ProviderTypeBedrock, ProviderTypeOllama, ProviderTypeCustom, ProviderTypeDeepseek, ProviderTypeGlm, ProviderTypeKimi, ProviderTypeQwen:
+	case ProviderTypeOpenai, ProviderTypeAnthropic, ProviderTypeGemini, ProviderTypeBedrock, ProviderTypeOllama, ProviderTypeCustom, ProviderTypeDeepseek, ProviderTypeGlm, ProviderTypeKimi, ProviderTypeQwen, ProviderTypeMinimax, ProviderTypeMistral, ProviderTypeXai:
 		return true
 	}
 	return false
@@ -1183,20 +1254,26 @@ func (e ProviderType) MarshalGQL(w io.Writer) {
 type ReasoningEffort string
 
 const (
-	ReasoningEffortHigh   ReasoningEffort = "high"
-	ReasoningEffortMedium ReasoningEffort = "medium"
-	ReasoningEffortLow    ReasoningEffort = "low"
+	ReasoningEffortXhigh   ReasoningEffort = "xhigh"
+	ReasoningEffortMax     ReasoningEffort = "max"
+	ReasoningEffortHigh    ReasoningEffort = "high"
+	ReasoningEffortMedium  ReasoningEffort = "medium"
+	ReasoningEffortLow     ReasoningEffort = "low"
+	ReasoningEffortMinimal ReasoningEffort = "minimal"
 )
 
 var AllReasoningEffort = []ReasoningEffort{
+	ReasoningEffortXhigh,
+	ReasoningEffortMax,
 	ReasoningEffortHigh,
 	ReasoningEffortMedium,
 	ReasoningEffortLow,
+	ReasoningEffortMinimal,
 }
 
 func (e ReasoningEffort) IsValid() bool {
 	switch e {
-	case ReasoningEffortHigh, ReasoningEffortMedium, ReasoningEffortLow:
+	case ReasoningEffortXhigh, ReasoningEffortMax, ReasoningEffortHigh, ReasoningEffortMedium, ReasoningEffortLow, ReasoningEffortMinimal:
 		return true
 	}
 	return false
@@ -1220,6 +1297,49 @@ func (e *ReasoningEffort) UnmarshalGQL(v interface{}) error {
 }
 
 func (e ReasoningEffort) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type ReasoningMode string
+
+const (
+	ReasoningModeAdaptive ReasoningMode = "adaptive"
+	ReasoningModeBudget   ReasoningMode = "budget"
+	ReasoningModeOff      ReasoningMode = "off"
+)
+
+var AllReasoningMode = []ReasoningMode{
+	ReasoningModeAdaptive,
+	ReasoningModeBudget,
+	ReasoningModeOff,
+}
+
+func (e ReasoningMode) IsValid() bool {
+	switch e {
+	case ReasoningModeAdaptive, ReasoningModeBudget, ReasoningModeOff:
+		return true
+	}
+	return false
+}
+
+func (e ReasoningMode) String() string {
+	return string(e)
+}
+
+func (e *ReasoningMode) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = ReasoningMode(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid ReasoningMode", str)
+	}
+	return nil
+}
+
+func (e ReasoningMode) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
@@ -1523,6 +1643,55 @@ func (e *ToolCallStatus) UnmarshalGQL(v interface{}) error {
 }
 
 func (e ToolCallStatus) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type UpdateState string
+
+const (
+	UpdateStateDisabled        UpdateState = "disabled"
+	UpdateStatePending         UpdateState = "pending"
+	UpdateStateUnreachable     UpdateState = "unreachable"
+	UpdateStateUnknown         UpdateState = "unknown"
+	UpdateStateUpToDate        UpdateState = "up_to_date"
+	UpdateStateUpdateAvailable UpdateState = "update_available"
+)
+
+var AllUpdateState = []UpdateState{
+	UpdateStateDisabled,
+	UpdateStatePending,
+	UpdateStateUnreachable,
+	UpdateStateUnknown,
+	UpdateStateUpToDate,
+	UpdateStateUpdateAvailable,
+}
+
+func (e UpdateState) IsValid() bool {
+	switch e {
+	case UpdateStateDisabled, UpdateStatePending, UpdateStateUnreachable, UpdateStateUnknown, UpdateStateUpToDate, UpdateStateUpdateAvailable:
+		return true
+	}
+	return false
+}
+
+func (e UpdateState) String() string {
+	return string(e)
+}
+
+func (e *UpdateState) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = UpdateState(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid UpdateState", str)
+	}
+	return nil
+}
+
+func (e UpdateState) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"pentagi/pkg/providers/pconfig"
@@ -20,15 +21,28 @@ type Provider struct {
 	providerType   provider.ProviderType
 	providerName   provider.ProviderName
 	modelName      string
-	responses      map[string]interface{} // key -> response mapping
+	responses      map[string]any // key -> response mapping
 	defaultResp    string
 	streamingDelay time.Duration
+	providerConfig *pconfig.ProviderConfig
+	pricesByType   map[pconfig.ProviderOptionsType]pconfig.PriceInfo
+	models         pconfig.ModelsConfig
+	rawConfig      []byte
+
+	// sequence, when set via SetSequentialResponses, makes CallWithTools
+	// ignore content-based matching and return each response strictly in
+	// call order instead. Needed for multi-turn tool-calling scenarios
+	// where a tool call is answered and the model is called again with the
+	// same TextContent (a tool response carries no text), so content-based
+	// matching alone can't tell the calls apart.
+	sequence      []any
+	sequenceCalls atomic.Int32
 }
 
 // ResponseConfig configures mock responses
 type ResponseConfig struct {
-	Key      string      // Request identifier (prompt/message content)
-	Response interface{} // Response (string, *llms.ContentResponse, or error)
+	Key      string // Request identifier (prompt/message content)
+	Response any    // Response (string, *llms.ContentResponse, or error)
 }
 
 // NewProvider creates a new mock provider
@@ -37,7 +51,7 @@ func NewProvider(providerType provider.ProviderType, providerName provider.Provi
 		providerType:   providerType,
 		providerName:   providerName,
 		modelName:      modelName,
-		responses:      make(map[string]interface{}),
+		responses:      make(map[string]any),
 		defaultResp:    "Mock response",
 		streamingDelay: time.Millisecond * 10,
 	}
@@ -55,9 +69,34 @@ func (p *Provider) SetDefaultResponse(response string) {
 	p.defaultResp = response
 }
 
+// SetSequentialResponses configures CallWithTools to return responses
+// strictly in order, one per call, bypassing content-based matching
+// entirely. The last response repeats for any call beyond len(responses).
+// Each element is handled exactly like a ResponseConfig.Response value
+// (string, *llms.ContentResponse, or error).
+func (p *Provider) SetSequentialResponses(responses ...any) {
+	p.sequence = responses
+	p.sequenceCalls.Store(0)
+}
+
 // SetStreamingDelay configures delay between streaming chunks
 func (p *Provider) SetStreamingDelay(delay time.Duration) {
 	p.streamingDelay = delay
+}
+
+// SetProviderConfig configures the per-agent config GetProviderConfig
+// returns, so capability gating (tester.capabilitySupported) can be exercised
+// against a mock the same way it reads a real provider's loaded YAML — e.g.
+// setting AgentConfig.Reasoning.Mode to off/adaptive for a given agent type.
+func (p *Provider) SetProviderConfig(pc *pconfig.ProviderConfig) {
+	p.providerConfig = pc
+}
+
+// SetModels configures the model catalog GetModels returns, so tests can
+// simulate an adaptive-only (or otherwise reasoning-classified) model without
+// depending on the SDK's real model-name tables.
+func (p *Provider) SetModels(models pconfig.ModelsConfig) {
+	p.models = models
 }
 
 // Type implements provider.Provider
@@ -87,6 +126,9 @@ func (p *Provider) GetUsage(info map[string]any) pconfig.CallUsage {
 
 // GetModels implements provider.Provider
 func (p *Provider) GetModels() pconfig.ModelsConfig {
+	if p.models != nil {
+		return p.models
+	}
 	return pconfig.ModelsConfig{}
 }
 
@@ -119,6 +161,17 @@ func (p *Provider) CallEx(
 	chain []llms.MessageContent,
 	streamCb streaming.Callback,
 ) (*llms.ContentResponse, error) {
+	if p.sequence != nil {
+		idx := int(p.sequenceCalls.Add(1)) - 1
+		if idx >= len(p.sequence) {
+			idx = len(p.sequence) - 1
+		}
+		if streamCb != nil {
+			return p.handleStreamingResponse(ctx, p.sequence[idx], streamCb)
+		}
+		return p.handleContentResponse(p.sequence[idx])
+	}
+
 	// Extract content for matching
 	var content string
 	for _, msg := range chain {
@@ -131,7 +184,7 @@ func (p *Provider) CallEx(
 	content = strings.TrimSpace(content)
 
 	// Look for response
-	var respInterface interface{}
+	var respInterface any
 	if resp, ok := p.responses[content]; ok {
 		respInterface = resp
 	} else {
@@ -164,6 +217,18 @@ func (p *Provider) CallWithTools(
 	tools []llms.Tool,
 	streamCb streaming.Callback,
 ) (*llms.ContentResponse, error) {
+	if p.sequence != nil {
+		idx := int(p.sequenceCalls.Add(1)) - 1
+		if idx >= len(p.sequence) {
+			idx = len(p.sequence) - 1 // repeat the last configured response past the end
+		}
+
+		if streamCb != nil {
+			return p.handleStreamingResponse(ctx, p.sequence[idx], streamCb)
+		}
+		return p.handleContentResponse(p.sequence[idx])
+	}
+
 	// Extract content for matching
 	var content string
 	for _, msg := range chain {
@@ -176,7 +241,7 @@ func (p *Provider) CallWithTools(
 	content = strings.TrimSpace(content)
 
 	// Look for tool-specific response
-	var respInterface interface{}
+	var respInterface any
 	toolKey := fmt.Sprintf("tools:%s", content)
 	if resp, ok := p.responses[toolKey]; ok {
 		respInterface = resp
@@ -213,18 +278,113 @@ func (p *Provider) CallWithTools(
 	return p.handleContentResponse(respInterface)
 }
 
+func (p *Provider) CallWithExtraOptions(
+	ctx context.Context,
+	opt pconfig.ProviderOptionsType,
+	chain []llms.MessageContent,
+	tools []llms.Tool,
+	streamCb streaming.Callback,
+	extra ...llms.CallOption,
+) (*llms.ContentResponse, error) {
+	var applied llms.CallOptions
+	for _, o := range extra {
+		o(&applied)
+	}
+
+	if err := applied.ValidateStructuredOutput(); err != nil {
+		return nil, err
+	}
+
+	if p.sequence != nil {
+		idx := int(p.sequenceCalls.Add(1)) - 1
+		if idx >= len(p.sequence) {
+			idx = len(p.sequence) - 1
+		}
+		if streamCb != nil {
+			return p.handleStreamingResponse(ctx, p.sequence[idx], streamCb)
+		}
+		return p.handleContentResponse(p.sequence[idx])
+	}
+
+	var content string
+	for _, msg := range chain {
+		for _, part := range msg.Parts {
+			if textContent, ok := part.(llms.TextContent); ok {
+				content += textContent.Text + " "
+			}
+		}
+	}
+	content = strings.TrimSpace(content)
+
+	var respInterface any
+	if resp, ok := p.responses[content]; ok {
+		respInterface = resp
+	} else {
+		for key, resp := range p.responses {
+			if strings.Contains(content, key) {
+				respInterface = resp
+				break
+			}
+		}
+	}
+	if respInterface == nil {
+		respInterface = p.synthesizedToolCall(tools)
+	}
+
+	resp, err := p.handleContentResponse(respInterface)
+	if err != nil {
+		return nil, err
+	}
+
+	if applied.Reasoning != nil {
+		resp = reasoningApplied(resp, applied.Reasoning)
+	}
+
+	if streamCb == nil {
+		return resp, nil
+	}
+
+	return p.handleStreamingResponse(ctx, resp, streamCb)
+}
+
 // GetRawConfig implements provider.Provider
 func (p *Provider) GetRawConfig() []byte {
+	if p.rawConfig != nil {
+		return p.rawConfig
+	}
 	return []byte(`{"mock": true}`)
+}
+
+// SetRawConfig overrides what GetRawConfig returns, so a test can build two
+// providers that share a name but not a configuration — exactly what a user
+// provider named like a built-in one produces once it is deleted or renamed.
+func (p *Provider) SetRawConfig(raw []byte) {
+	p.rawConfig = raw
 }
 
 // GetProviderConfig implements provider.Provider
 func (p *Provider) GetProviderConfig() *pconfig.ProviderConfig {
+	if p.providerConfig != nil {
+		return p.providerConfig
+	}
 	return &pconfig.ProviderConfig{}
+}
+
+// SetPriceInfo pins the price for one agent type. Types left unset keep the default.
+func (p *Provider) SetPriceInfo(opt pconfig.ProviderOptionsType, price pconfig.PriceInfo) {
+	if p.pricesByType == nil {
+		p.pricesByType = make(map[pconfig.ProviderOptionsType]pconfig.PriceInfo)
+	}
+
+	p.pricesByType[opt] = price
 }
 
 // GetPriceInfo implements provider.Provider
 func (p *Provider) GetPriceInfo(opt pconfig.ProviderOptionsType) *pconfig.PriceInfo {
+	if price, ok := p.pricesByType[opt]; ok {
+		return &price
+	}
+
 	return &pconfig.PriceInfo{
 		Input:  0.01,
 		Output: 0.02,
@@ -232,7 +392,7 @@ func (p *Provider) GetPriceInfo(opt pconfig.ProviderOptionsType) *pconfig.PriceI
 }
 
 // handleResponse processes different response types for Call method
-func (p *Provider) handleResponse(resp interface{}) (string, error) {
+func (p *Provider) handleResponse(resp any) (string, error) {
 	switch r := resp.(type) {
 	case string:
 		return r, nil
@@ -249,7 +409,7 @@ func (p *Provider) handleResponse(resp interface{}) (string, error) {
 }
 
 // handleContentResponse processes responses for CallEx/CallWithTools
-func (p *Provider) handleContentResponse(resp interface{}) (*llms.ContentResponse, error) {
+func (p *Provider) handleContentResponse(resp any) (*llms.ContentResponse, error) {
 	switch r := resp.(type) {
 	case error:
 		return nil, r
@@ -277,7 +437,7 @@ func (p *Provider) handleContentResponse(resp interface{}) (*llms.ContentRespons
 // handleStreamingResponse simulates streaming behavior
 func (p *Provider) handleStreamingResponse(
 	ctx context.Context,
-	resp interface{},
+	resp any,
 	streamCb streaming.Callback,
 ) (*llms.ContentResponse, error) {
 	contentResp, err := p.handleContentResponse(resp)
@@ -328,4 +488,35 @@ func (p *Provider) handleStreamingResponse(
 	}
 
 	return contentResp, nil
+}
+
+func (p *Provider) synthesizedToolCall(tools []llms.Tool) any {
+	if len(tools) == 0 {
+		return p.defaultResp
+	}
+	return &llms.ContentResponse{
+		Choices: []*llms.ContentChoice{{
+			ToolCalls: []llms.ToolCall{{
+				FunctionCall: &llms.FunctionCall{
+					Name:      tools[0].Function.Name,
+					Arguments: `{"message": "mock response"}`,
+				},
+			}},
+		}},
+	}
+}
+
+func reasoningApplied(resp *llms.ContentResponse, want *llms.ReasoningConfig) *llms.ContentResponse {
+	out := &llms.ContentResponse{Choices: make([]*llms.ContentChoice, 0, len(resp.Choices))}
+	for _, choice := range resp.Choices {
+		copied := *choice
+		switch {
+		case want.IsDisabled():
+			copied.Reasoning = nil
+		case want.Adaptive && copied.Reasoning.IsEmpty():
+			copied.Reasoning = &reasoning.ContentReasoning{Content: "mock adaptive reasoning trace"}
+		}
+		out.Choices = append(out.Choices, &copied)
+	}
+	return out
 }

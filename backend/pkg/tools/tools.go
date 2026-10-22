@@ -11,10 +11,13 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"pentagi/pkg/config"
 	"pentagi/pkg/database"
+	"pentagi/pkg/database/knowledge/limits"
+	"pentagi/pkg/database/knowledge/vectorstore"
 	"pentagi/pkg/docker"
 	"pentagi/pkg/flowfiles"
 	"pentagi/pkg/graph/model"
@@ -22,7 +25,7 @@ import (
 	"pentagi/pkg/providers/embeddings"
 	"pentagi/pkg/schema"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/cloud/anonymizer"
 	"github.com/vxcontrol/cloud/anonymizer/patterns"
@@ -125,6 +128,8 @@ type TermLogProvider interface {
 		containerID int64,
 		taskID, subtaskID *int64,
 	) (int64, error)
+	ContainerNotRunning(ctx context.Context, containerID int64, taskID, subtaskID *int64) error
+	ContainerRunning(ctx context.Context, containerID int64, taskID, subtaskID *int64) error
 }
 
 type VectorStoreLogProvider interface {
@@ -188,6 +193,7 @@ type flowToolsExecutor struct {
 
 type ContextToolsExecutor interface {
 	Tools() []llms.Tool
+	// Execute returns an error only when the tool produced no result: callers run the tool again on error.
 	Execute(ctx context.Context, streamID int64, id, name, obsName, thinking string, args json.RawMessage) (string, error)
 	IsBarrierFunction(name string) bool
 	IsFunctionExists(name string) bool
@@ -347,6 +353,16 @@ type FlowToolsExecutor interface {
 	GetReporterExecutor(cfg ReporterExecutorConfig) (ContextToolsExecutor, error)
 }
 
+// sharedReplacer is a process-level singleton for the anonymizer replacer.
+// The replacer is built from immutable sources (embedded patterns + startup
+// config), so it is safe to share across all flow executor instances.
+// ReplaceString is a pure read operation and is goroutine-safe.
+var (
+	sharedReplacer     anonymizer.Replacer
+	sharedReplacerOnce sync.Once
+	sharedReplacerErr  error
+)
+
 func NewFlowToolsExecutor(
 	db database.Querier,
 	cfg *config.Config,
@@ -354,24 +370,28 @@ func NewFlowToolsExecutor(
 	functions *Functions,
 	userID, flowID int64,
 ) (FlowToolsExecutor, error) {
-	allPatterns, err := patterns.LoadPatterns(patterns.PatternListTypeAll)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load all patterns: %v", err)
-	}
+	// Build the replacer exactly once for the lifetime of the process.
+	// cfg.GetSecretPatterns() reads environment variables that are fixed at
+	// startup, so the first caller's config is representative for all callers.
+	sharedReplacerOnce.Do(func() {
+		allPatterns, err := patterns.LoadPatterns(patterns.PatternListTypeAll)
+		if err != nil {
+			sharedReplacerErr = fmt.Errorf("failed to load all patterns: %v", err)
+			return
+		}
+		allPatterns.Patterns = append(allPatterns.Patterns, cfg.GetSecretPatterns()...)
+		sharedReplacer, sharedReplacerErr = anonymizer.NewReplacer(allPatterns.Regexes(), allPatterns.Names())
+	})
 
-	// combine with config secret patterns
-	allPatterns.Patterns = append(allPatterns.Patterns, cfg.GetSecretPatterns()...)
-
-	replacer, err := anonymizer.NewReplacer(allPatterns.Regexes(), allPatterns.Names())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create replacer: %v", err)
+	if sharedReplacerErr != nil {
+		return nil, fmt.Errorf("failed to create replacer: %v", sharedReplacerErr)
 	}
 
 	return &flowToolsExecutor{
 		db:          db,
 		docker:      docker,
 		functions:   functions,
-		replacer:    replacer,
+		replacer:    sharedReplacer,
 		cfg:         cfg,
 		flowID:      flowID,
 		userID:      userID,
@@ -408,20 +428,14 @@ func (fte *flowToolsExecutor) SetEmbedder(embedder embeddings.Embedder) {
 		fte.store = nil
 	}
 
-	opts := []pgvector.Option{
-		pgvector.WithEmbedder(embedder),
-		pgvector.WithCollectionName("langchain"),
+	store, err := pgvector.New(context.Background(),
+		vectorstore.Options(embedder, fte.cfg.PgxPool, fte.cfg.DatabaseURL)...)
+	if err != nil {
+		logrus.WithError(err).WithField("flow_id", fte.flowID).Warn(
+			"failed to open the vector store; memory and knowledge tools are unavailable to this flow")
+		return
 	}
-	if fte.cfg.PgxPool != nil {
-		opts = append(opts, pgvector.WithConn(fte.cfg.PgxPool))
-	} else {
-		opts = append(opts, pgvector.WithConnectionURL(fte.cfg.DatabaseURL))
-	}
-
-	store, err := pgvector.New(context.Background(), opts...)
-	if err == nil {
-		fte.store = &store
-	}
+	fte.store = &store
 }
 
 func (fte *flowToolsExecutor) SetFunctions(functions *Functions) {
@@ -465,45 +479,55 @@ func (fte *flowToolsExecutor) SetGraphitiClient(client *graphiti.Client) {
 }
 
 func (fte *flowToolsExecutor) Prepare(ctx context.Context) error {
-	// Reuse existing container if truly running in Docker; clean up stale records otherwise.
 	if cnt, err := fte.db.GetFlowPrimaryContainer(ctx, fte.flowID); err == nil {
-		switch cnt.Status {
-		case database.ContainerStatusRunning:
-			// Verify against Docker — DB may be stale after some unexpected cases.
-			if isRunning, checkErr := fte.docker.IsContainerRunning(ctx, cnt.LocalID.String); checkErr == nil && isRunning {
+		containerName := PrimaryTerminalName(fte.cfg.TenantPrefix(), fte.flowID)
+		// the stored status goes stale when the container is removed outside pentagi
+		isProbed := cnt.Status == database.ContainerStatusRunning ||
+			cnt.Status == database.ContainerStatusFailed && cnt.LocalID.String != ""
+		if isProbed {
+			running, err := fte.docker.IsContainerRunning(ctx, cnt.LocalID.String)
+			if err != nil {
+				return fmt.Errorf("failed to inspect container '%s': %w", containerName, err)
+			}
+			if running {
+				if cnt.Status != database.ContainerStatusRunning {
+					_, err := fte.db.UpdateContainerStatus(ctx, database.UpdateContainerStatusParams{
+						Status: database.ContainerStatusRunning,
+						ID:     cnt.ID,
+					})
+					if err != nil {
+						return fmt.Errorf("failed to mark container '%s' running: %w", containerName, err)
+					}
+				}
+				// Kept rather than replaced: what was installed in it outside /work survives only in this container.
 				fte.primaryID = cnt.ID
 				fte.primaryLID = cnt.LocalID.String
 				if err := fte.syncMissingFiles(ctx); err != nil {
-					return fmt.Errorf("failed to sync missing files to container '%s': %w", PrimaryTerminalName(fte.flowID), err)
+					return fmt.Errorf("failed to sync missing files to container '%s': %w", containerName, err)
 				}
 				return nil
 			}
-			logrus.WithContext(ctx).Warnf("primary container %s recorded as running in DB but not operational in docker, cleaning up...", cnt.LocalID.String)
-			fte.docker.RemoveContainer(ctx, cnt.LocalID.String, cnt.ID)
-		default:
-			// Container was stopped/removed; clean up before creating a fresh one.
-			fte.docker.RemoveContainer(ctx, cnt.LocalID.String, cnt.ID)
+		}
+
+		if err := fte.docker.RemoveContainer(ctx, cnt.LocalID.String, cnt.ID); err != nil {
+			logrus.WithContext(ctx).WithError(err).WithFields(enrichLogrusFields(fte.flowID, nil, nil, logrus.Fields{
+				"container_name": containerName,
+			})).Warn("failed to remove stale primary container before rebuild")
 		}
 	}
 
-	capAdd := []string{"NET_RAW"}
-	if fte.cfg.DockerNetAdmin {
-		capAdd = append(capAdd, "NET_ADMIN")
-	}
+	// Shared with the startup sandbox check, so the container it measures is the
+	// container agents get.
+	workerConfig, workerHostConfig := docker.WorkerSpec(fte.cfg, fte.image)
 
-	containerName := PrimaryTerminalName(fte.flowID)
+	containerName := PrimaryTerminalName(fte.cfg.TenantPrefix(), fte.flowID)
 	cnt, err := fte.docker.RunContainer(
 		ctx,
 		containerName,
 		database.ContainerTypePrimary,
 		fte.flowID,
-		&container.Config{
-			Image:      fte.image,
-			Entrypoint: []string{"tail", "-f", "/dev/null"},
-		},
-		&container.HostConfig{
-			CapAdd: capAdd,
-		},
+		workerConfig,
+		workerHostConfig,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to launch container '%s': %w", containerName, err)
@@ -622,8 +646,8 @@ func (fte *flowToolsExecutor) findMissingInContainer(ctx context.Context, entrie
 		cmd = append(cmd, e.containerPath)
 	}
 
-	containerName := PrimaryTerminalName(fte.flowID)
-	createResp, err := fte.docker.ContainerExecCreate(ctx, containerName, container.ExecOptions{
+	containerName := PrimaryTerminalName(fte.cfg.TenantPrefix(), fte.flowID)
+	createResp, err := fte.docker.ContainerExecCreate(ctx, containerName, client.ExecCreateOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -632,7 +656,7 @@ func (fte *flowToolsExecutor) findMissingInContainer(ctx context.Context, entrie
 		return nil, fmt.Errorf("failed to create file-check exec: %w", err)
 	}
 
-	resp, err := fte.docker.ContainerExecAttach(ctx, createResp.ID, container.ExecAttachOptions{})
+	resp, err := fte.docker.ContainerExecAttach(ctx, createResp.ID, client.ExecAttachOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to attach file-check exec: %w", err)
 	}
@@ -649,7 +673,6 @@ func (fte *flowToolsExecutor) findMissingInContainer(ctx context.Context, entrie
 		return nil, fmt.Errorf("file-check exec failed with exit code %d: %s", inspect.ExitCode, strings.TrimSpace(string(output)))
 	}
 
-	// Build a lookup map for O(1) access.
 	byContainerPath := make(map[string]fileSyncEntry, len(entries))
 	for _, e := range entries {
 		byContainerPath[e.containerPath] = e
@@ -677,9 +700,9 @@ func (fte *flowToolsExecutor) copyEntriesToContainer(ctx context.Context, entrie
 		errCh <- flowfiles.WriteFilesTar(pw, convertSyncEntriesToTarEntries(entries))
 	}()
 
-	containerName := PrimaryTerminalName(fte.flowID)
+	containerName := PrimaryTerminalName(fte.cfg.TenantPrefix(), fte.flowID)
 	copyErr := fte.docker.CopyToContainer(ctx, containerName, docker.WorkFolderPathInContainer, pr,
-		container.CopyToContainerOptions{AllowOverwriteDirWithFile: true})
+		client.CopyToContainerOptions{AllowOverwriteDirWithFile: true})
 	pr.Close()
 	writeErr := <-errCh
 
@@ -732,7 +755,7 @@ func (fte *flowToolsExecutor) Release(ctx context.Context) error {
 
 	// TODO: here better to get flow containers list and purge all of them
 	if err := fte.docker.RemoveContainer(ctx, fte.primaryLID, fte.primaryID); err != nil {
-		containerName := PrimaryTerminalName(fte.flowID)
+		containerName := PrimaryTerminalName(fte.cfg.TenantPrefix(), fte.flowID)
 		return fmt.Errorf("failed to purge container '%s': %w", containerName, err)
 	}
 
@@ -774,6 +797,7 @@ func (fte *flowToolsExecutor) GetCustomExecutor(cfg CustomExecutorConfig) (Conte
 		subtaskID:   cfg.SubtaskID,
 		mlp:         fte.mlp,
 		tclp:        fte.tclp,
+		replacer:    fte.replacer,
 		vslp:        fte.vslp,
 		db:          fte.db,
 		store:       fte.store,
@@ -818,6 +842,7 @@ func (fte *flowToolsExecutor) GetAssistantExecutor(cfg AssistantExecutorConfig) 
 		fte.flowID, nil, nil,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
@@ -862,6 +887,7 @@ func (fte *flowToolsExecutor) GetAssistantExecutor(cfg AssistantExecutorConfig) 
 	} else {
 		memory := NewMemoryTool(
 			fte.flowID,
+			fte.replacer,
 			fte.store,
 			fte.vslp,
 		)
@@ -914,79 +940,12 @@ func (fte *flowToolsExecutor) GetAssistantExecutor(cfg AssistantExecutorConfig) 
 			definitions = append(definitions, registryDefinitions[SearchCodeToolName])
 			handlers[SearchCodeToolName] = code.Handle
 		}
+	}
 
-		google := NewGoogleTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-		)
-		if google.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[GoogleToolName])
-			handlers[GoogleToolName] = google.Handle
-		}
-
-		duckduckgo := NewDuckDuckGoTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-		)
-		if duckduckgo.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[DuckDuckGoToolName])
-			handlers[DuckDuckGoToolName] = duckduckgo.Handle
-		}
-
-		tavily := NewTavilyTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-			cfg.Summarizer,
-		)
-		if tavily.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[TavilyToolName])
-			handlers[TavilyToolName] = tavily.Handle
-		}
-
-		traversaal := NewTraversaalTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-		)
-		if traversaal.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[TraversaalToolName])
-			handlers[TraversaalToolName] = traversaal.Handle
-		}
-
-		perplexity := NewPerplexityTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-			cfg.Summarizer,
-		)
-		if perplexity.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[PerplexityToolName])
-			handlers[PerplexityToolName] = perplexity.Handle
-		}
-
-		searxng := NewSearxngTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-			cfg.Summarizer,
-		)
-		if searxng.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[SearxngToolName])
-			handlers[SearxngToolName] = searxng.Handle
-		}
-
-		sploitus := NewSploitusTool(
-			fte.cfg,
-			fte.flowID, nil, nil,
-			fte.slp,
-		)
-		if sploitus.IsAvailable() {
-			definitions = append(definitions, registryDefinitions[SploitusToolName])
-			handlers[SploitusToolName] = sploitus.Handle
-		}
+	webSearch := buildWebSearch(fte, nil, nil, cfg.Summarizer)
+	if webSearch.IsAvailable() {
+		definitions = append(definitions, registryDefinitions[WebSearchToolName])
+		handlers[WebSearchToolName] = webSearch.Handle
 	}
 
 	flowStatus := NewFlowStatusTool(fte.flowID, fte.db, cfg.Summarizer)
@@ -1022,6 +981,7 @@ func (fte *flowToolsExecutor) GetAssistantExecutor(cfg AssistantExecutorConfig) 
 		flowID:      fte.flowID,
 		mlp:         fte.mlp,
 		tclp:        fte.tclp,
+		replacer:    fte.replacer,
 		vslp:        fte.vslp,
 		db:          fte.db,
 		store:       fte.store,
@@ -1070,6 +1030,7 @@ func (fte *flowToolsExecutor) GetPrimaryExecutor(cfg PrimaryExecutorConfig) (Con
 		subtaskID: &cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1134,6 +1095,7 @@ func (fte *flowToolsExecutor) GetInstallerExecutor(cfg InstallerExecutorConfig) 
 		cfg.SubtaskID,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
@@ -1146,6 +1108,7 @@ func (fte *flowToolsExecutor) GetInstallerExecutor(cfg InstallerExecutorConfig) 
 		subtaskID: cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1240,6 +1203,7 @@ func (fte *flowToolsExecutor) GetCoderExecutor(cfg CoderExecutorConfig) (Context
 		cfg.SubtaskID,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
@@ -1252,6 +1216,7 @@ func (fte *flowToolsExecutor) GetCoderExecutor(cfg CoderExecutorConfig) (Context
 		subtaskID: cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1317,6 +1282,7 @@ func (fte *flowToolsExecutor) GetCoderExecutor(cfg CoderExecutorConfig) (Context
 		fte.flowID,
 		cfg.TaskID,
 		cfg.SubtaskID,
+		fte.cfg.GroupID(fte.flowID),
 		fte.graphitiClient,
 	)
 	if graphitiSearch.IsAvailable() {
@@ -1363,6 +1329,7 @@ func (fte *flowToolsExecutor) GetPentesterExecutor(cfg PentesterExecutorConfig) 
 		cfg.SubtaskID,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
@@ -1375,6 +1342,7 @@ func (fte *flowToolsExecutor) GetPentesterExecutor(cfg PentesterExecutorConfig) 
 		subtaskID: cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1442,6 +1410,7 @@ func (fte *flowToolsExecutor) GetPentesterExecutor(cfg PentesterExecutorConfig) 
 		fte.flowID,
 		cfg.TaskID,
 		cfg.SubtaskID,
+		fte.cfg.GroupID(fte.flowID),
 		fte.graphitiClient,
 	)
 	if graphitiSearch.IsAvailable() {
@@ -1449,16 +1418,10 @@ func (fte *flowToolsExecutor) GetPentesterExecutor(cfg PentesterExecutorConfig) 
 		ce.handlers[GraphitiSearchToolName] = graphitiSearch.Handle
 	}
 
-	sploitus := NewSploitusTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-	)
-	if sploitus.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[SploitusToolName])
-		ce.handlers[SploitusToolName] = sploitus.Handle
+	webSearch := buildWebSearch(fte, cfg.TaskID, cfg.SubtaskID, cfg.Summarizer)
+	if webSearch.IsAvailable() {
+		ce.definitions = append(ce.definitions, registryDefinitions[WebSearchToolName])
+		ce.handlers[WebSearchToolName] = webSearch.Handle
 	}
 
 	return ce, nil
@@ -1480,6 +1443,7 @@ func (fte *flowToolsExecutor) GetSearcherExecutor(cfg SearcherExecutorConfig) (C
 		subtaskID: cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1511,91 +1475,10 @@ func (fte *flowToolsExecutor) GetSearcherExecutor(cfg SearcherExecutorConfig) (C
 		ce.handlers[BrowserToolName] = browser.Handle
 	}
 
-	google := NewGoogleTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-	)
-	if google.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[GoogleToolName])
-		ce.handlers[GoogleToolName] = google.Handle
-	}
-
-	duckduckgo := NewDuckDuckGoTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-	)
-	if duckduckgo.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[DuckDuckGoToolName])
-		ce.handlers[DuckDuckGoToolName] = duckduckgo.Handle
-	}
-
-	tavily := NewTavilyTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-		cfg.Summarizer,
-	)
-	if tavily.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[TavilyToolName])
-		ce.handlers[TavilyToolName] = tavily.Handle
-	}
-
-	traversaal := NewTraversaalTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-	)
-	if traversaal.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[TraversaalToolName])
-		ce.handlers[TraversaalToolName] = traversaal.Handle
-	}
-
-	perplexity := NewPerplexityTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-		cfg.Summarizer,
-	)
-	if perplexity.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[PerplexityToolName])
-		ce.handlers[PerplexityToolName] = perplexity.Handle
-	}
-
-	searxng := NewSearxngTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-		cfg.Summarizer,
-	)
-	if searxng.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[SearxngToolName])
-		ce.handlers[SearxngToolName] = searxng.Handle
-	}
-
-	sploitus := NewSploitusTool(
-		fte.cfg,
-		fte.flowID,
-		cfg.TaskID,
-		cfg.SubtaskID,
-		fte.slp,
-	)
-	if sploitus.IsAvailable() {
-		ce.definitions = append(ce.definitions, registryDefinitions[SploitusToolName])
-		ce.handlers[SploitusToolName] = sploitus.Handle
+	webSearch := buildWebSearch(fte, cfg.TaskID, cfg.SubtaskID, cfg.Summarizer)
+	if webSearch.IsAvailable() {
+		ce.definitions = append(ce.definitions, registryDefinitions[WebSearchToolName])
+		ce.handlers[WebSearchToolName] = webSearch.Handle
 	}
 
 	search := NewSearchTool(
@@ -1641,20 +1524,22 @@ func (fte *flowToolsExecutor) GetGeneratorExecutor(cfg GeneratorExecutorConfig) 
 		nil,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
 	)
 
 	ce := &customExecutor{
-		userID: fte.userID,
-		flowID: fte.flowID,
-		taskID: &cfg.TaskID,
-		mlp:    fte.mlp,
-		tclp:   fte.tclp,
-		vslp:   fte.vslp,
-		db:     fte.db,
-		store:  fte.store,
+		userID:   fte.userID,
+		flowID:   fte.flowID,
+		taskID:   &cfg.TaskID,
+		mlp:      fte.mlp,
+		tclp:     fte.tclp,
+		replacer: fte.replacer,
+		vslp:     fte.vslp,
+		db:       fte.db,
+		store:    fte.store,
 		definitions: []llms.FunctionDefinition{
 			registryDefinitions[MemoristToolName],
 			registryDefinitions[SearchToolName],
@@ -1709,20 +1594,22 @@ func (fte *flowToolsExecutor) GetRefinerExecutor(cfg RefinerExecutorConfig) (Con
 		nil,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
 	)
 
 	ce := &customExecutor{
-		userID: fte.userID,
-		flowID: fte.flowID,
-		taskID: &cfg.TaskID,
-		mlp:    fte.mlp,
-		tclp:   fte.tclp,
-		vslp:   fte.vslp,
-		db:     fte.db,
-		store:  fte.store,
+		userID:   fte.userID,
+		flowID:   fte.flowID,
+		taskID:   &cfg.TaskID,
+		mlp:      fte.mlp,
+		tclp:     fte.tclp,
+		replacer: fte.replacer,
+		vslp:     fte.vslp,
+		db:       fte.db,
+		store:    fte.store,
 		definitions: []llms.FunctionDefinition{
 			registryDefinitions[MemoristToolName],
 			registryDefinitions[SearchToolName],
@@ -1773,6 +1660,7 @@ func (fte *flowToolsExecutor) GetMemoristExecutor(cfg MemoristExecutorConfig) (C
 		cfg.SubtaskID,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
@@ -1785,6 +1673,7 @@ func (fte *flowToolsExecutor) GetMemoristExecutor(cfg MemoristExecutorConfig) (C
 		subtaskID: cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1806,6 +1695,7 @@ func (fte *flowToolsExecutor) GetMemoristExecutor(cfg MemoristExecutorConfig) (C
 
 	memory := NewMemoryTool(
 		fte.flowID,
+		fte.replacer,
 		fte.store,
 		fte.vslp,
 	)
@@ -1818,6 +1708,7 @@ func (fte *flowToolsExecutor) GetMemoristExecutor(cfg MemoristExecutorConfig) (C
 		fte.flowID,
 		cfg.TaskID,
 		cfg.SubtaskID,
+		fte.cfg.GroupID(fte.flowID),
 		fte.graphitiClient,
 	)
 	if graphitiSearch.IsAvailable() {
@@ -1844,6 +1735,7 @@ func (fte *flowToolsExecutor) GetEnricherExecutor(cfg EnricherExecutorConfig) (C
 		cfg.SubtaskID,
 		container.ID,
 		container.LocalID.String,
+		fte.cfg.TenantPrefix(),
 		fte.docker,
 		fte.tlp,
 		time.Duration(fte.cfg.TerminalToolTimeout)*time.Second,
@@ -1856,6 +1748,7 @@ func (fte *flowToolsExecutor) GetEnricherExecutor(cfg EnricherExecutorConfig) (C
 		subtaskID: cfg.SubtaskID,
 		mlp:       fte.mlp,
 		tclp:      fte.tclp,
+		replacer:  fte.replacer,
 		vslp:      fte.vslp,
 		db:        fte.db,
 		store:     fte.store,
@@ -1877,6 +1770,7 @@ func (fte *flowToolsExecutor) GetEnricherExecutor(cfg EnricherExecutorConfig) (C
 
 	memory := NewMemoryTool(
 		fte.flowID,
+		fte.replacer,
 		fte.store,
 		fte.vslp,
 	)
@@ -1889,6 +1783,7 @@ func (fte *flowToolsExecutor) GetEnricherExecutor(cfg EnricherExecutorConfig) (C
 		fte.flowID,
 		cfg.TaskID,
 		cfg.SubtaskID,
+		fte.cfg.GroupID(fte.flowID),
 		fte.graphitiClient,
 	)
 	if graphitiSearch.IsAvailable() {
@@ -1925,6 +1820,7 @@ func (fte *flowToolsExecutor) GetReporterExecutor(cfg ReporterExecutorConfig) (C
 		subtaskID:   cfg.SubtaskID,
 		mlp:         fte.mlp,
 		tclp:        fte.tclp,
+		replacer:    fte.replacer,
 		vslp:        fte.vslp,
 		db:          fte.db,
 		store:       fte.store,
@@ -1948,4 +1844,8 @@ func enrichLogrusFields(flowID int64, taskID, subtaskID *int64, fields logrus.Fi
 	}
 
 	return fields
+}
+
+func boundedContent(replacer anonymizer.Replacer, raw string) string {
+	return limits.TruncateToLimit(replacer.ReplaceString(raw), limits.MaxContentLen)
 }

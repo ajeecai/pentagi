@@ -421,8 +421,6 @@ definitions:
     required:
     - flow_id
     - image
-    - local_dir
-    - local_id
     - name
     - status
     - type
@@ -442,8 +440,21 @@ definitions:
       size:
         type: integer
     type: object
+  models.ContainerFileError:
+    properties:
+      message:
+        type: string
+      name:
+        type: string
+      path:
+        type: string
+    type: object
   models.ContainerFiles:
     properties:
+      failures:
+        items:
+          $ref: '#/definitions/models.ContainerFileError'
+        type: array
       files:
         items:
           $ref: '#/definitions/models.ContainerFile'
@@ -452,6 +463,11 @@ definitions:
         type: string
       total:
         type: integer
+      truncated:
+        description: |-
+          Truncated is true when the directory held more entries than the listing cap
+          and only the first page was returned.
+        type: boolean
     type: object
   models.CopyResourceRequest:
     properties:
@@ -540,7 +556,6 @@ definitions:
         type: string
       content:
         maxLength: 65536
-        minLength: 1
         type: string
       description:
         maxLength: 1000
@@ -551,7 +566,6 @@ definitions:
         type: string
       question:
         maxLength: 2048
-        minLength: 1
         type: string
     required:
     - content
@@ -587,6 +601,19 @@ definitions:
     required:
     - date
     - stats
+    type: object
+  models.EmailChange:
+    properties:
+      current_password:
+        maxLength: 100
+        minLength: 5
+        type: string
+      mail:
+        maxLength: 50
+        type: string
+    required:
+    - current_password
+    - mail
     type: object
   models.Flow:
     properties:
@@ -633,7 +660,6 @@ definitions:
     - status
     - title
     - tool_call_id_template
-    - trace_id
     - user_id
     type: object
   models.FlowExecutionStats:
@@ -746,7 +772,6 @@ definitions:
     - tasks
     - title
     - tool_call_id_template
-    - trace_id
     - user_id
     type: object
   models.FlowUsageResponse:
@@ -883,7 +908,6 @@ definitions:
         type: boolean
       query:
         maxLength: 2048
-        minLength: 1
         type: string
     required:
     - query
@@ -1020,6 +1044,15 @@ definitions:
     - result_format
     - type
     type: object
+  models.NameChange:
+    properties:
+      name:
+        maxLength: 70
+        minLength: 1
+        type: string
+    required:
+    - name
+    type: object
   models.Password:
     properties:
       confirm_password:
@@ -1029,7 +1062,6 @@ definitions:
         minLength: 5
         type: string
       password:
-        maxLength: 100
         type: string
     required:
     - current_password
@@ -1065,6 +1097,7 @@ definitions:
         - finish
         - input
         - rename
+        - report
         type: string
       input:
         example: user input for waiting flow
@@ -1078,6 +1111,11 @@ definitions:
         items:
           type: integer
         type: array
+      timeout:
+        example: 600
+        maximum: 7200
+        minimum: 30
+        type: integer
     required:
     - action
     type: object
@@ -1570,7 +1608,6 @@ definitions:
         type: string
       content:
         maxLength: 65536
-        minLength: 1
         type: string
       description:
         maxLength: 1000
@@ -1579,7 +1616,6 @@ definitions:
         type: string
       question:
         maxLength: 2048
-        minLength: 1
         type: string
     required:
     - content
@@ -1653,7 +1689,6 @@ definitions:
         maxLength: 70
         type: string
       password:
-        maxLength: 100
         type: string
       password_change_required:
         type: boolean
@@ -2055,7 +2090,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -2181,7 +2217,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -2301,6 +2338,10 @@ paths:
           description: login not permitted
           schema:
             $ref: '#/definitions/ErrorResponse'
+        "429":
+          description: too many login attempts
+          schema:
+            $ref: '#/definitions/ErrorResponse'
         "500":
           description: internal error on login
           schema:
@@ -2376,19 +2417,19 @@ paths:
       tags:
       - Public
   /auth/logout:
-    get:
-      parameters:
-      - default: /
-        description: URI to redirect user there after logout
-        in: query
-        name: return_uri
-        type: string
+    post:
       produces:
       - application/json
       responses:
-        "307":
-          description: redirect to input return_uri path
-      summary: Logout current user via HTTP redirect
+        "200":
+          description: logout successful
+          schema:
+            $ref: '#/definitions/SuccessResponse'
+        "500":
+          description: internal error on ending the user's sessions
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Logout current user and end all of their sessions
       tags:
       - Public
   /auth/logout-callback:
@@ -2400,6 +2441,10 @@ paths:
           description: logout successful
           schema:
             $ref: '#/definitions/SuccessResponse'
+        "500":
+          description: internal error on ending the user's sessions
+          schema:
+            $ref: '#/definitions/ErrorResponse'
       summary: Logout current user from external OAuth application
       tags:
       - Public
@@ -2430,7 +2475,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -2514,7 +2560,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -2761,7 +2808,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -2851,7 +2899,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -2941,7 +2990,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -3212,7 +3262,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -3807,7 +3858,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -3897,7 +3949,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4067,7 +4120,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4157,7 +4211,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4247,7 +4302,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4431,7 +4487,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4571,7 +4628,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4661,7 +4719,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4843,7 +4902,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -4966,6 +5026,10 @@ paths:
           description: internal error on getting information about system and config
           schema:
             $ref: '#/definitions/ErrorResponse'
+        "503":
+          description: the session could not be checked right now
+          schema:
+            $ref: '#/definitions/ErrorResponse'
       security:
       - BearerAuth: []
       summary: Retrieve current user and system settings
@@ -4998,7 +5062,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -5293,7 +5358,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -5377,7 +5443,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -5846,6 +5913,17 @@ paths:
           type: string
         name: paths[]
         type: array
+      - description: resource id to download (may be combined with ids[])
+        in: query
+        name: id
+        type: integer
+      - collectionFormat: multi
+        description: additional resource ids to download (repeatable)
+        in: query
+        items:
+          type: integer
+        name: ids[]
+        type: array
       produces:
       - application/octet-stream
       - application/zip
@@ -5913,7 +5991,7 @@ paths:
             $ref: '#/definitions/ErrorResponse'
       security:
       - BearerAuth: []
-      summary: Create a virtual directory
+      summary: Create a virtual directory and any missing parents
       tags:
       - Resources
   /resources/move:
@@ -5991,7 +6069,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -6108,7 +6187,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -6192,7 +6272,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -6299,7 +6380,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -6555,7 +6637,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -6654,6 +6737,11 @@ paths:
         name: period
         required: true
         type: string
+      - default: UTC
+        description: IANA timezone name the day boundaries are cut in
+        in: query
+        name: timezone
+        type: string
       produces:
       - application/json
       responses:
@@ -6712,6 +6800,80 @@ paths:
       summary: Retrieve current user information
       tags:
       - Users
+  /user/email:
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: container to validate and update account email
+        in: body
+        name: json
+        required: true
+        schema:
+          $ref: '#/definitions/models.EmailChange'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: account email updated successful
+          schema:
+            $ref: '#/definitions/SuccessResponse'
+        "400":
+          description: invalid account email form data
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: updating account email not permitted
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: current user not found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "409":
+          description: email already exists
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "500":
+          description: internal error on updating account email
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Update email for current user (account)
+      tags:
+      - Users
+  /user/name:
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: new display name
+        in: body
+        name: json
+        required: true
+        schema:
+          $ref: '#/definitions/models.NameChange'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: account name updated successful
+          schema:
+            $ref: '#/definitions/SuccessResponse'
+        "400":
+          description: invalid account name form data
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: current user not found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "500":
+          description: internal error on updating account name
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Change current account display name
+      tags:
+      - User
   /user/password:
     put:
       consumes:
@@ -6776,7 +6938,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1
@@ -7011,7 +7174,8 @@ paths:
         required: true
         type: integer
       - default: 5
-        description: Amount items per page (min -1, max 1000, -1 means unlimited)
+        description: Amount items per page (min -1, max 1000, -1 means unlimited,
+          absent means DefaultPageSize)
         in: query
         maximum: 1000
         minimum: -1

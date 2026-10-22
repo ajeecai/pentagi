@@ -109,8 +109,8 @@ function Sidebar({
                         } as React.CSSProperties
                     }
                 >
-                    <SheetTitle className="sr-only"></SheetTitle>
-                    <SheetDescription className="sr-only"></SheetDescription>
+                    <SheetTitle className="sr-only">Sidebar</SheetTitle>
+                    <SheetDescription className="sr-only">Displays the mobile sidebar.</SheetDescription>
                     <div className="flex h-full w-full flex-col">{children}</div>
                 </SheetContent>
             </Sheet>
@@ -293,13 +293,20 @@ function SidebarMenu({ className, ...props }: React.ComponentProps<'ul'>) {
     );
 }
 
-function SidebarMenuItem({ className, ...props }: React.ComponentProps<'li'>) {
+function SidebarMenuItem({ children, className, ...props }: React.ComponentProps<'li'>) {
+    const hasAction = React.Children.toArray(children).some(
+        (child) => React.isValidElement(child) && child.type === SidebarMenuAction,
+    );
+
     return (
         <li
             className={cn('group/menu-item relative', className)}
+            data-has-action={hasAction || undefined}
             data-sidebar="menu-item"
             {...props}
-        />
+        >
+            {children}
+        </li>
     );
 }
 
@@ -319,9 +326,6 @@ function SidebarProvider({
     const { isMobile } = useBreakpoint();
     const [openMobile, setOpenMobile] = React.useState(false);
 
-    // This is the internal state of the sidebar.
-    // We use openProp and setOpenProp for control from outside the component.
-    // First, try to read from cookie, fallback to defaultOpen
     const [_open, _setOpen] = React.useState(() => {
         const cookieValue = getSidebarState();
 
@@ -376,8 +380,6 @@ function SidebarProvider({
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [toggleSidebar]);
 
-    // We add a state so that we can do data-state="expanded" or "collapsed".
-    // This makes it easier to style the sidebar with Tailwind classes.
     const state = open ? 'expanded' : 'collapsed';
 
     const contextValue = React.useMemo<SidebarContext>(
@@ -473,7 +475,7 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
 }
 
 const sidebarMenuButtonVariants = cva(
-    'peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-hidden ring-sidebar-ring transition-[width,height,padding] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 group-has-data-[sidebar=menu-action]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [li[data-has-action=true]_&]:pr-8',
+    'peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-hidden ring-sidebar-ring transition-[width,height,padding] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [li[data-has-action=true]_&]:pr-8',
     {
         defaultVariants: {
             size: 'default',

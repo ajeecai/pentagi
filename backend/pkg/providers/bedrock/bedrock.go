@@ -5,14 +5,13 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
+	"os"
 	"reflect"
-	"sync"
 
 	"pentagi/pkg/config"
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
+	"pentagi/pkg/system"
 	"pentagi/pkg/templates"
 
 	bconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -28,7 +27,7 @@ import (
 //go:embed config.yml models.yml
 var configFS embed.FS
 
-const BedrockAgentModel = bedrock.ModelAnthropicClaudeSonnet4
+const BedrockAgentModel = bedrock.ModelAnthropicClaudeSonnet46
 
 const BedrockToolCallIDTemplate = "tooluse_{r:22:x}"
 
@@ -48,8 +47,17 @@ func BuildProviderConfig(configData []byte) (*pconfig.ProviderConfig, error) {
 	return providerConfig, nil
 }
 
-func DefaultProviderConfig() (*pconfig.ProviderConfig, error) {
-	configData, err := configFS.ReadFile("config.yml")
+func DefaultProviderConfig(cfg *config.Config) (*pconfig.ProviderConfig, error) {
+	var (
+		configData []byte
+		err        error
+	)
+
+	if cfg.BedrockConfig == "" {
+		configData, err = configFS.ReadFile("config.yml")
+	} else {
+		configData, err = os.ReadFile(cfg.BedrockConfig)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +71,12 @@ func DefaultModels() (pconfig.ModelsConfig, error) {
 		return nil, err
 	}
 
-	return pconfig.LoadModelsConfigData(configData)
+	models, err := pconfig.LoadModelsConfigData(configData)
+	if err != nil {
+		return nil, err
+	}
+
+	return models, nil
 }
 
 type bedrockProvider struct {
@@ -71,10 +84,6 @@ type bedrockProvider struct {
 	models         pconfig.ModelsConfig
 	providerName   provider.ProviderName
 	providerConfig *pconfig.ProviderConfig
-
-	toolCallIDTemplate     string
-	toolCallIDTemplateOnce sync.Once
-	toolCallIDTemplateErr  error
 }
 
 func New(
@@ -96,7 +105,7 @@ func New(
 			Token: smithybearer.Token{
 				Value: cfg.BedrockBearerToken,
 			},
-		}))
+		}), bconfig.WithAuthSchemePreference("httpBearerAuth"))
 	} else if cfg.BedrockAccessKey != "" && cfg.BedrockSecretKey != "" {
 		// Use static credentials (traditional approach)
 		opts = append(opts, bconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -112,15 +121,12 @@ func New(
 		opts = append(opts, bconfig.WithBaseEndpoint(cfg.BedrockServerURL))
 	}
 
-	if cfg.ProxyURL != "" {
-		opts = append(opts, bconfig.WithHTTPClient(&http.Client{
-			Transport: &http.Transport{
-				Proxy: func(req *http.Request) (*url.URL, error) {
-					return url.Parse(cfg.ProxyURL)
-				},
-			},
-		}))
+	httpClient, err := system.GetHTTPClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 	}
+
+	opts = append(opts, bconfig.WithHTTPClient(httpClient))
 
 	bcfg, err := bconfig.LoadDefaultConfig(context.Background(), opts...)
 	if err != nil {
@@ -196,8 +202,7 @@ func (p *bedrockProvider) Call(
 	prompt string,
 ) (string, error) {
 	return provider.WrapGenerateFromSinglePrompt(
-		ctx, p, opt, p.llm, prompt,
-		p.providerConfig.GetOptionsForType(opt)...,
+		ctx, p, opt, p.llm, prompt, p.providerConfig.GetOptionsForType(opt)...,
 	)
 }
 
@@ -223,7 +228,7 @@ func (p *bedrockProvider) CallEx(
 	// Clean tools from $schema field
 	tools = cleanToolSchemas(tools)
 
-	// Build final options: streaming + config + cleaned tools LAST (to override any dirty tools from config)
+	// Put cleaned tools after config to override any dirty tools restored from config.
 	options := []llms.CallOption{llms.WithStreamingFunc(streamCb)}
 	options = append(options, configOptions...)
 	options = append(options, llms.WithTools(tools))
@@ -249,8 +254,31 @@ func (p *bedrockProvider) CallWithTools(
 
 	configOptions := p.providerConfig.GetOptionsForType(opt)
 
-	// Build final options: config + streaming + cleaned tools LAST (to override any dirty tools from config)
+	// Put cleaned tools after config to override any dirty tools restored from config.
 	options := append(configOptions, llms.WithStreamingFunc(streamCb), llms.WithTools(tools))
+
+	return provider.WrapGenerateContent(ctx, p, opt, p.llm.GenerateContent, chain, options...)
+}
+
+func (p *bedrockProvider) CallWithExtraOptions(
+	ctx context.Context,
+	opt pconfig.ProviderOptionsType,
+	chain []llms.MessageContent,
+	tools []llms.Tool,
+	streamCb streaming.Callback,
+	extra ...llms.CallOption,
+) (*llms.ContentResponse, error) {
+	tools = restoreMissedToolsFromChain(chain, tools)
+	tools = cleanToolSchemas(tools)
+
+	configOptions := p.providerConfig.GetOptionsForType(opt)
+
+	options := []llms.CallOption{llms.WithStreamingFunc(streamCb)}
+	options = append(options, configOptions...)
+	if len(tools) > 0 {
+		options = append(options, llms.WithTools(tools))
+	}
+	options = append(options, extra...)
 
 	return provider.WrapGenerateContent(ctx, p, opt, p.llm.GenerateContent, chain, options...)
 }

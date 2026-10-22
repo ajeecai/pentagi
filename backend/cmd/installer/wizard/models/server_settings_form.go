@@ -2,6 +2,8 @@ package models
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -11,10 +13,17 @@ import (
 	"pentagi/cmd/installer/wizard/logger"
 	"pentagi/cmd/installer/wizard/styles"
 	"pentagi/cmd/installer/wizard/window"
+	"pentagi/pkg/config"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/vxcontrol/cloud/models"
 	"github.com/vxcontrol/cloud/sdk"
 )
+
+// schemaNameRegex keeps DATABASE_EXTENSIONS_SCHEMA within PostgreSQL's
+// unquoted-identifier rules and 63-byte limit, so a typo surfaces here rather
+// than as a failed CREATE EXTENSION on first boot.
+var schemaNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
 
 // ServerSettingsFormModel represents the PentAGI server settings configuration form
 type ServerSettingsFormModel struct {
@@ -41,6 +50,41 @@ func (m *ServerSettingsFormModel) BuildForm() tea.Cmd {
 		locale.ServerSettingsLicenseKeyDesc,
 		config.LicenseKey,
 		true,
+	))
+
+	fields = append(fields, m.createTextField("update_strategy",
+		locale.ServerSettingsUpdateStrategy,
+		locale.ServerSettingsUpdateStrategyDesc,
+		config.UpdateStrategy,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("update_server_host",
+		locale.ServerSettingsUpdateServerHost,
+		locale.ServerSettingsUpdateServerHostDesc,
+		config.UpdateServerHost,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("support_server_host",
+		locale.ServerSettingsSupportServerHost,
+		locale.ServerSettingsSupportServerHostDesc,
+		config.SupportServerHost,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("pentagi_tenant_id",
+		locale.ServerSettingsTenantID,
+		locale.ServerSettingsTenantIDDesc,
+		config.TenantID,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("pentagi_pprof_addr",
+		locale.ServerSettingsPprofAddr,
+		locale.ServerSettingsPprofAddrDesc,
+		config.PprofAddr,
+		false,
 	))
 
 	// host and port
@@ -71,6 +115,14 @@ func (m *ServerSettingsFormModel) BuildForm() tea.Cmd {
 		locale.ServerSettingsCORSOrigins,
 		locale.ServerSettingsCORSOriginsDesc,
 		config.CorsOrigins,
+		false,
+	))
+
+	// trusted proxies
+	fields = append(fields, m.createTextField("pentagi_trusted_proxies",
+		locale.ServerSettingsTrustedProxies,
+		locale.ServerSettingsTrustedProxiesDesc,
+		config.TrustedProxies,
 		false,
 	))
 
@@ -144,6 +196,20 @@ func (m *ServerSettingsFormModel) BuildForm() tea.Cmd {
 		locale.ServerSettingsCookieSigningSaltDesc,
 		config.CookieSigningSalt,
 		true,
+	))
+
+	fields = append(fields, m.createTextField("database_extensions_schema",
+		locale.ServerSettingsDatabaseExtensionsSchema,
+		locale.ServerSettingsDatabaseExtensionsSchemaDesc,
+		config.DatabaseExtensionsSchema,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("database_search_path_via_options",
+		locale.ServerSettingsDatabaseSearchPathViaOptions,
+		locale.ServerSettingsDatabaseSearchPathViaOptionsDesc,
+		config.DatabaseSearchPathViaOpt,
+		false,
 	))
 
 	m.SetFormFields(fields)
@@ -227,6 +293,44 @@ func (m *ServerSettingsFormModel) GetCurrentConfiguration() string {
 	}
 	licenseStatus = m.GetStyles().Muted.Render(licenseStatus)
 	sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsLicenseKeyHint, licenseStatus))
+
+	if tenantID := cfg.TenantID.Value; tenantID != "" {
+		tenantID = m.GetStyles().Info.Render(tenantID)
+		sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsTenantIDHint, tenantID))
+	} else {
+		tenantID = locale.StatusNotConfigured
+		tenantID = m.GetStyles().Muted.Render(tenantID)
+		sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsTenantIDHint, tenantID))
+	}
+
+	// both only take effect with a tenant configured, so keep them out of the
+	// overview of a single-instance deployment
+	if cfg.TenantID.Value != "" {
+		if schema := cfg.DatabaseExtensionsSchema.Value; schema != "" {
+			schema = m.GetStyles().Info.Render(schema)
+			sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsDatabaseExtensionsSchemaHint, schema))
+		} else if schema := cfg.DatabaseExtensionsSchema.Default; schema != "" {
+			schema = m.GetStyles().Muted.Render(schema)
+			sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsDatabaseExtensionsSchemaHint, schema))
+		}
+
+		if viaOptions := cfg.DatabaseSearchPathViaOpt.Value; viaOptions == "true" {
+			viaOptions = m.GetStyles().Info.Render("Enabled")
+			sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsDatabaseSearchPathViaOptionsHint, viaOptions))
+		} else {
+			viaOptions = m.GetStyles().Muted.Render("Disabled")
+			sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsDatabaseSearchPathViaOptionsHint, viaOptions))
+		}
+	}
+
+	if pprofAddr := cfg.PprofAddr.Value; pprofAddr != "" {
+		pprofAddr = m.GetStyles().Info.Render(pprofAddr)
+		sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsPprofAddrHint, pprofAddr))
+	} else {
+		pprofAddr = locale.StatusNotConfigured
+		pprofAddr = m.GetStyles().Muted.Render(pprofAddr)
+		sections = append(sections, fmt.Sprintf("• %s: %s", locale.ServerSettingsPprofAddrHint, pprofAddr))
+	}
 
 	if listenIP := cfg.ListenIP.Value; listenIP != "" {
 		listenIP = m.GetStyles().Info.Render(listenIP)
@@ -354,6 +458,10 @@ func (m *ServerSettingsFormModel) GetHelpContent() string {
 		switch field.Key {
 		case "pentagi_license_key":
 			sections = append(sections, locale.ServerSettingsLicenseKeyHelp)
+		case "pentagi_tenant_id":
+			sections = append(sections, locale.ServerSettingsTenantIDHelp)
+		case "pentagi_pprof_addr":
+			sections = append(sections, locale.ServerSettingsPprofAddrHelp)
 		case "pentagi_server_host":
 			sections = append(sections, locale.ServerSettingsHostHelp)
 		case "pentagi_server_port":
@@ -362,6 +470,8 @@ func (m *ServerSettingsFormModel) GetHelpContent() string {
 			sections = append(sections, locale.ServerSettingsPublicURLHelp)
 		case "pentagi_cors_origins":
 			sections = append(sections, locale.ServerSettingsCORSOriginsHelp)
+		case "pentagi_trusted_proxies":
+			sections = append(sections, locale.ServerSettingsTrustedProxiesHelp)
 		case "proxy_url":
 			sections = append(sections, locale.ServerSettingsProxyURLHelp)
 		case "http_client_timeout":
@@ -378,6 +488,10 @@ func (m *ServerSettingsFormModel) GetHelpContent() string {
 			sections = append(sections, locale.ServerSettingsDataDirHelp)
 		case "pentagi_cookie_signing_salt":
 			sections = append(sections, locale.ServerSettingsCookieSigningSaltHelp)
+		case "database_extensions_schema":
+			sections = append(sections, locale.ServerSettingsDatabaseExtensionsSchemaHelp)
+		case "database_search_path_via_options":
+			sections = append(sections, locale.ServerSettingsDatabaseSearchPathViaOptionsHelp)
 		default:
 			sections = append(sections, locale.ServerSettingsFormOverview)
 		}
@@ -391,19 +505,27 @@ func (m *ServerSettingsFormModel) HandleSave() error {
 	fields := m.GetFormFields()
 
 	newCfg := &controller.ServerSettingsConfig{
-		LicenseKey:          cfg.LicenseKey,
-		ListenIP:            cfg.ListenIP,
-		ListenPort:          cfg.ListenPort,
-		CorsOrigins:         cfg.CorsOrigins,
-		CookieSigningSalt:   cfg.CookieSigningSalt,
-		ProxyURL:            cfg.ProxyURL,
-		HTTPClientTimeout:   cfg.HTTPClientTimeout,
-		TerminalToolTimeout: cfg.TerminalToolTimeout,
-		ExternalSSLCAPath:   cfg.ExternalSSLCAPath,
-		ExternalSSLInsecure: cfg.ExternalSSLInsecure,
-		SSLDir:              cfg.SSLDir,
-		DataDir:             cfg.DataDir,
-		PublicURL:           cfg.PublicURL,
+		TenantID:                 cfg.TenantID,
+		LicenseKey:               cfg.LicenseKey,
+		UpdateStrategy:           cfg.UpdateStrategy,
+		UpdateServerHost:         cfg.UpdateServerHost,
+		SupportServerHost:        cfg.SupportServerHost,
+		PprofAddr:                cfg.PprofAddr,
+		ListenIP:                 cfg.ListenIP,
+		ListenPort:               cfg.ListenPort,
+		CorsOrigins:              cfg.CorsOrigins,
+		TrustedProxies:           cfg.TrustedProxies,
+		CookieSigningSalt:        cfg.CookieSigningSalt,
+		ProxyURL:                 cfg.ProxyURL,
+		HTTPClientTimeout:        cfg.HTTPClientTimeout,
+		TerminalToolTimeout:      cfg.TerminalToolTimeout,
+		ExternalSSLCAPath:        cfg.ExternalSSLCAPath,
+		ExternalSSLInsecure:      cfg.ExternalSSLInsecure,
+		SSLDir:                   cfg.SSLDir,
+		DataDir:                  cfg.DataDir,
+		PublicURL:                cfg.PublicURL,
+		DatabaseExtensionsSchema: cfg.DatabaseExtensionsSchema,
+		DatabaseSearchPathViaOpt: cfg.DatabaseSearchPathViaOpt,
 	}
 
 	for _, field := range fields {
@@ -419,6 +541,35 @@ func (m *ServerSettingsFormModel) HandleSave() error {
 				}
 			}
 			newCfg.LicenseKey.Value = value
+		case "update_strategy":
+			// Empty means "use the default", which is a legitimate answer and the
+			// one every existing installation currently gives. Anything else has to
+			// be a member of the vocabulary: the field is free text, so this is the
+			// only thing standing between a typo and an installation that quietly
+			// falls back to a channel the user did not pick.
+			if value != "" {
+				if err := models.UpdateStrategy(strings.ToLower(value)).Valid(); err != nil {
+					return fmt.Errorf("invalid update strategy %q: use preview, stable or nightly", value)
+				}
+				value = strings.ToLower(value)
+			}
+			newCfg.UpdateStrategy.Value = value
+		case "update_server_host":
+			newCfg.UpdateServerHost.Value = value
+		case "support_server_host":
+			newCfg.SupportServerHost.Value = value
+		case "pentagi_tenant_id":
+			if err := (&config.Config{TenantID: value}).ValidateTenantID(); err != nil {
+				return err
+			}
+			newCfg.TenantID.Value = value
+		case "pentagi_pprof_addr":
+			if value != "" {
+				if _, _, err := net.SplitHostPort(value); err != nil {
+					return fmt.Errorf("invalid pprof address: must be host:port (e.g., :7777 or 127.0.0.1:7778)")
+				}
+			}
+			newCfg.PprofAddr.Value = value
 		case "pentagi_server_host":
 			newCfg.ListenIP.Value = value
 		case "pentagi_server_port":
@@ -432,6 +583,8 @@ func (m *ServerSettingsFormModel) HandleSave() error {
 			newCfg.PublicURL.Value = value
 		case "pentagi_cors_origins":
 			newCfg.CorsOrigins.Value = value
+		case "pentagi_trusted_proxies":
+			newCfg.TrustedProxies.Value = value
 		case "proxy_url":
 			newCfg.ProxyURL.Value = value
 		case "proxy_username":
@@ -469,6 +622,16 @@ func (m *ServerSettingsFormModel) HandleSave() error {
 			newCfg.DataDir.Value = value
 		case "pentagi_cookie_signing_salt":
 			newCfg.CookieSigningSalt.Value = value
+		case "database_extensions_schema":
+			if value != "" && !schemaNameRegex.MatchString(value) {
+				return fmt.Errorf("invalid extensions schema: must match %s", schemaNameRegex.String())
+			}
+			newCfg.DatabaseExtensionsSchema.Value = value
+		case "database_search_path_via_options":
+			if value != "" && value != "true" && value != "false" {
+				return fmt.Errorf("invalid value for search path via options: must be 'true' or 'false'")
+			}
+			newCfg.DatabaseSearchPathViaOpt.Value = value
 		}
 	}
 
@@ -491,11 +654,11 @@ func (m *ServerSettingsFormModel) OnFieldChanged(fieldIndex int, oldValue, newVa
 }
 
 func (m *ServerSettingsFormModel) GetFormFields() []FormField {
-	return m.BaseScreen.fields
+	return m.fields
 }
 
 func (m *ServerSettingsFormModel) SetFormFields(fields []FormField) {
-	m.BaseScreen.fields = fields
+	m.fields = fields
 }
 
 // Update handles screen-specific input, then delegates to base screen

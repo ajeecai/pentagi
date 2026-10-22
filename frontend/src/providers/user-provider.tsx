@@ -5,8 +5,10 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import type { AuthInfo } from '@/models/info';
+import type { User } from '@/models/user';
 
-import { api } from '@/lib/axios';
+import { api, getApiErrorCode } from '@/lib/axios';
+import { routes } from '@/lib/routes';
 import { getReturnUrlParam } from '@/lib/utils/auth';
 import { baseUrl } from '@/models/api';
 
@@ -31,6 +33,7 @@ interface UserContextType {
     login: (credentials: LoginCredentials) => Promise<LoginResult>;
     loginWithOAuth: (provider: OAuthProvider) => Promise<LoginResult>;
     logout: (returnUrl?: string) => Promise<void>;
+    patchUser: (patch: Partial<User>) => void;
     refreshAuthInfo: () => Promise<void>;
     setAuth: (authInfo: AuthInfo) => void;
 }
@@ -38,6 +41,8 @@ interface UserContextType {
 const UserContext = createContext<undefined | UserContextType>(undefined);
 
 export const AUTH_STORAGE_KEY = 'auth';
+
+export const LOGIN_LOCKED_MESSAGE = 'Too many login attempts. Wait a few minutes and try again.';
 
 export function UserProvider({ children }: { children: ReactNode }) {
     const navigate = useNavigate();
@@ -118,6 +123,17 @@ export function UserProvider({ children }: { children: ReactNode }) {
         return expirationDate > now;
     }, [authInfo]);
 
+    const patchUser = useCallback(
+        (patch: Partial<User>) => {
+            if (!authInfo?.user) {
+                return;
+            }
+
+            setAuth({ ...authInfo, user: { ...authInfo.user, ...patch } });
+        },
+        [authInfo, setAuth],
+    );
+
     const refreshAuthInfo = useCallback(async () => {
         try {
             const info = await api.get<AuthInfo>('/info');
@@ -128,12 +144,13 @@ export function UserProvider({ children }: { children: ReactNode }) {
                 clearAuth();
             }
         } catch {
-            clearAuth();
+            // A transient /info failure (network, 5xx, timeout) is not auth loss — the axios
+            // interceptor hard-redirects on a real 401/403. Keep the current session.
         }
     }, [setAuth, clearAuth]);
 
     useEffect(() => {
-        if (location.pathname === '/login' && !isLoading) {
+        if (location.pathname === routes.login() && !isLoading) {
             // eslint-disable-next-line react-hooks/set-state-in-effect -- refreshAuthInfo's setState runs after an async fetch, not synchronously
             refreshAuthInfo();
         }
@@ -145,13 +162,13 @@ export function UserProvider({ children }: { children: ReactNode }) {
             const finalReturnUrl = returnUrl || getReturnUrlParam(currentPath);
 
             try {
-                await api.get('/auth/logout');
+                await api.post('/auth/logout');
                 toast.success('Successfully logged out');
             } catch {
                 toast.error('Logout failed, but clearing local session');
             } finally {
                 clearAuth();
-                window.location.href = `/login${finalReturnUrl}`;
+                window.location.href = `${routes.login()}${finalReturnUrl}`;
             }
         },
         [clearAuth, location.pathname],
@@ -188,8 +205,11 @@ export function UserProvider({ children }: { children: ReactNode }) {
                 }
 
                 return { success: true };
-            } catch {
-                const errorMessage = 'Login failed. Please try again.';
+            } catch (error) {
+                const errorMessage =
+                    getApiErrorCode(error) === 'Auth.TooManyAttempts'
+                        ? LOGIN_LOCKED_MESSAGE
+                        : 'Login failed. Please try again.';
                 toast.error(errorMessage);
 
                 return { error: errorMessage, success: false };
@@ -200,7 +220,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
 
     const loginWithOAuth = useCallback(
         async (provider: OAuthProvider): Promise<LoginResult> => {
-            const returnOAuthUri = '/oauth/result';
+            const returnOAuthUri = routes.oauthResult;
             const width = 500;
             const height = 600;
             const left = window.screenX + (window.outerWidth - width) / 2;
@@ -314,7 +334,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         const updateAuth = async () => {
-            const publicRoutes = ['/login', '/oauth/result'];
+            const publicRoutes = [routes.login(), routes.oauthResult];
 
             if (publicRoutes.includes(location.pathname)) {
                 return;
@@ -336,14 +356,11 @@ export function UserProvider({ children }: { children: ReactNode }) {
                 } else {
                     clearAuth();
                     toast.error('Session expired. Please login again.');
-                    const returnParam = getReturnUrlParam(location.pathname);
-                    navigate(`/login${returnParam}`);
+                    navigate(routes.login(location.pathname));
                 }
             } catch {
-                clearAuth();
-                toast.error('Session expired. Please login again.');
-                const returnParam = getReturnUrlParam(location.pathname);
-                navigate(`/login${returnParam}`);
+                // A transient /info failure on navigation must not log the user out — a network
+                // blip is not session expiry; the interceptor redirects on a real 401/403.
             }
         };
 
@@ -373,6 +390,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
                 login,
                 loginWithOAuth,
                 logout,
+                patchUser,
                 refreshAuthInfo,
                 setAuth,
             }}

@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils';
 
 import type { FileManagerBulkAction, FileManagerLabels, FileNode } from './file-manager-types';
 
-import { dedupeOverlappingPaths, formatFileSize, pluralizeItemsEnglish } from './file-manager-utils';
+import { formatFileSize, pluralizeItemsEnglish } from './file-manager-utils';
 
 interface BulkActionButtonProps {
     action: FileManagerBulkAction;
@@ -23,12 +23,17 @@ interface BulkActionButtonProps {
 }
 
 interface FileManagerBulkActionsBarProps {
+    /** Paths the action will carry, already resolved via `resolveActionPaths`. */
+    actionPaths: readonly string[];
     actions: readonly FileManagerBulkAction[];
+    /** Rows those paths cover, descendants included — what the bar and the confirmation report. */
+    affectedCount: number;
     files: FileNode[];
     labels: FileManagerLabels;
     onClearSelection: () => void;
-    selectedPaths: Set<string>;
-    /** Cumulative byte count of the deduped selection. `0` suppresses the size suffix. */
+    /** Ticked rows; drives visibility only. */
+    selectedCount: number;
+    /** Cumulative byte count of the resolved selection. `0` suppresses the size suffix. */
     selectionTotalBytes: number;
 }
 
@@ -46,32 +51,31 @@ interface ResolvedAction {
  *   - Actions with a `confirm` config trigger the shared ConfirmationDialog
  *     before invoking `onSelect`. The dialog state is owned here so each host
  *     doesn't have to wire its own.
- *   - The selection list is **deduped** before being handed to `onSelect` so
- *     a directory never ships together with one of its descendants — the
- *     caller deletes / moves / etc. only the parent.
+ *   - `actionPaths` arrives already resolved, so a directory never ships
+ *     together with one of its descendants — the caller deletes / moves / etc.
+ *     only the parent.
  */
 export function FileManagerBulkActionsBar({
+    actionPaths,
     actions,
+    affectedCount,
     files,
     labels,
     onClearSelection,
-    selectedPaths,
+    selectedCount,
     selectionTotalBytes,
 }: FileManagerBulkActionsBarProps) {
     const [pendingAction, setPendingAction] = useState<FileManagerBulkAction | null>(null);
 
-    // Resolve the deduped FileNode[] once per render — every action callback,
-    // confirm-dialog title and isDisabled / isHidden predicate share it, so
-    // recomputing per call would be wasteful.
     const dedupedFiles = useMemo(() => {
-        if (selectedPaths.size === 0) {
+        if (actionPaths.length === 0) {
             return [];
         }
 
-        const dedupedPathSet = new Set(dedupeOverlappingPaths(selectedPaths));
+        const actionPathSet = new Set(actionPaths);
 
-        return files.filter((file) => dedupedPathSet.has(file.path));
-    }, [files, selectedPaths]);
+        return files.filter((file) => actionPathSet.has(file.path));
+    }, [actionPaths, files]);
 
     const visibleActions = useMemo<ResolvedAction[]>(
         () =>
@@ -79,7 +83,7 @@ export function FileManagerBulkActionsBar({
                 .filter((action) => !action.isHidden?.(dedupedFiles))
                 .map((action) => ({
                     action,
-                    isDisabled: action.isDisabled?.(dedupedFiles) ?? false,
+                    isDisabled: dedupedFiles.length === 0 || (action.isDisabled?.(dedupedFiles) ?? false),
                 })),
         [actions, dedupedFiles],
     );
@@ -89,9 +93,6 @@ export function FileManagerBulkActionsBar({
 
     const runAction = useCallback(
         async (action: FileManagerBulkAction) => {
-            // `dedupedFiles` is captured at click time — the state used by the
-            // bar at that moment matches what the host receives, even if the
-            // selection mutates while an async confirm is open.
             await action.onSelect(dedupedFiles);
         },
         [dedupedFiles],
@@ -128,13 +129,13 @@ export function FileManagerBulkActionsBar({
         }
     }, []);
 
-    if (selectedPaths.size === 0 || actions.length === 0) {
+    if (selectedCount === 0 || actions.length === 0) {
         return null;
     }
 
     const pluralize = labels.pluralizeItems ?? pluralizeItemsEnglish;
-    const countLabel = pluralize(selectedPaths.size);
-    const baseSelectedText = labels.selectedLabel?.(selectedPaths.size) ?? `${selectedPaths.size} selected`;
+    const countLabel = pluralize(affectedCount);
+    const baseSelectedText = labels.selectedLabel?.(affectedCount) ?? `${affectedCount} selected`;
     const sizeSuffix = (labels.formatSelectionSize ?? formatFileSize)(selectionTotalBytes);
     const selectedText = sizeSuffix ? `${baseSelectedText} · ${sizeSuffix}` : baseSelectedText;
     const cancelText = labels.bulkCancel ?? 'Cancel';
@@ -190,7 +191,7 @@ export function FileManagerBulkActionsBar({
                                             handleActionClick(action);
                                         }}
                                     >
-                                        {action.icon ? <action.icon className="size-4" /> : null}
+                                        {action.icon ? <action.icon /> : null}
                                         {action.label}
                                     </DropdownMenuItem>
                                 ))}
@@ -215,11 +216,6 @@ export function FileManagerBulkActionsBar({
     );
 }
 
-/**
- * Inline button for a single non-overflow bulk action. Extracted so the icon-only
- * variant (no `label` text on narrow screens) can be added later without bloating
- * the parent's JSX.
- */
 function BulkActionButton({ action, isDisabled, onClick }: BulkActionButtonProps) {
     const Icon = action.icon as ComponentType<{ className?: string }> | undefined;
     const button = (
@@ -235,9 +231,6 @@ function BulkActionButton({ action, isDisabled, onClick }: BulkActionButtonProps
         </Button>
     );
 
-    // Tooltip surfaces the label when the inline text is hidden on narrow
-    // viewports (icon-only mode). On wider screens the label is already visible,
-    // so the tooltip is a harmless duplicate but still helps with keyboard focus.
     if (!action.icon) {
         return button;
     }

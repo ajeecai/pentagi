@@ -1,6 +1,12 @@
 package graphiti
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -8,143 +14,194 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewClient_Disabled(t *testing.T) {
+func TestClient_NewClient_EnablesOnlyAfterAHealthyProbe(t *testing.T) {
 	t.Parallel()
 
-	client, err := NewClient("", 0, false)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	assert.False(t, client.IsEnabled())
+	t.Run("a disabled client probes nothing", func(t *testing.T) {
+		t.Parallel()
+		client, err := NewClient("", 0, false)
+		require.NoError(t, err)
+		require.NotNil(t, client)
+		assert.False(t, client.IsEnabled())
+	})
+
+	tests := []struct {
+		name       string
+		failures   int32
+		wantErr    string
+		wantProbes int32
+	}{
+		{name: "a flaky probe is retried", failures: 1, wantProbes: 2},
+		{name: "every probe failing gives up", failures: 3, wantErr: "graphiti health check failed after 3 attempts", wantProbes: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var probes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if probes.Add(1) <= tt.failures {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, 5*time.Second, true)
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.True(t, client.IsEnabled())
+				assert.Equal(t, 5*time.Second, client.GetTimeout())
+			}
+			assert.Equal(t, tt.wantProbes, probes.Load())
+		})
+	}
 }
 
-func TestIsEnabled(t *testing.T) {
+// Covers IsEnabled and GetTimeout on a nil receiver, which callers holding no client rely on.
+func TestClient_NilClientIsDisabledWithoutATimeout(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil receiver returns false", func(t *testing.T) {
-		t.Parallel()
-		var c *Client
-		assert.False(t, c.IsEnabled())
-	})
-
-	t.Run("disabled client returns false", func(t *testing.T) {
-		t.Parallel()
-		c := &Client{enabled: false}
-		assert.False(t, c.IsEnabled())
-	})
-
-	t.Run("enabled client returns true", func(t *testing.T) {
-		t.Parallel()
-		c := &Client{enabled: true}
-		assert.True(t, c.IsEnabled())
-	})
+	var c *Client
+	assert.False(t, c.IsEnabled())
+	assert.Equal(t, time.Duration(0), c.GetTimeout())
 }
 
-func TestGetTimeout(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil receiver returns zero", func(t *testing.T) {
-		t.Parallel()
-		var c *Client
-		assert.Equal(t, time.Duration(0), c.GetTimeout())
-	})
-
-	t.Run("returns configured timeout", func(t *testing.T) {
-		t.Parallel()
-		c := &Client{timeout: 30 * time.Second}
-		assert.Equal(t, 30*time.Second, c.GetTimeout())
-	})
-}
-
-func TestAddMessages_Disabled(t *testing.T) {
-	t.Parallel()
-
-	client, err := NewClient("", 0, false)
-	require.NoError(t, err)
-
-	err = client.AddMessages(t.Context(), AddMessagesRequest{})
-	assert.NoError(t, err)
-}
-
-func TestSearchMethods_Disabled(t *testing.T) {
+// Subtests are keyed by method.
+func TestClient_DisabledClientCallsNothing(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		fn   func(t *testing.T, client *Client)
+		name    string
+		call    func(context.Context, *Client) (any, error)
+		wantErr bool
 	}{
 		{
-			"TemporalWindowSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.TemporalWindowSearch(t.Context(), TemporalSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "adding messages is a silent no-op",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return nil, c.AddMessages(ctx, AddMessagesRequest{})
 			},
 		},
 		{
-			"EntityRelationshipsSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.EntityRelationshipsSearch(t.Context(), EntityRelationshipSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "a temporal window search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.TemporalWindowSearch(ctx, TemporalSearchRequest{})
 			},
+			wantErr: true,
 		},
 		{
-			"DiverseResultsSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.DiverseResultsSearch(t.Context(), DiverseSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "an entity relationships search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.EntityRelationshipsSearch(ctx, EntityRelationshipSearchRequest{})
 			},
+			wantErr: true,
 		},
 		{
-			"EpisodeContextSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.EpisodeContextSearch(t.Context(), EpisodeContextSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "a diverse results search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.DiverseResultsSearch(ctx, DiverseSearchRequest{})
 			},
+			wantErr: true,
 		},
 		{
-			"SuccessfulToolsSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.SuccessfulToolsSearch(t.Context(), SuccessfulToolsSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "an episode context search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.EpisodeContextSearch(ctx, EpisodeContextSearchRequest{})
 			},
+			wantErr: true,
 		},
 		{
-			"RecentContextSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.RecentContextSearch(t.Context(), RecentContextSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "a successful tools search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.SuccessfulToolsSearch(ctx, SuccessfulToolsSearchRequest{})
 			},
+			wantErr: true,
 		},
 		{
-			"EntityByLabelSearch",
-			func(t *testing.T, client *Client) {
-				resp, err := client.EntityByLabelSearch(t.Context(), EntityByLabelSearchRequest{})
-				assert.Nil(t, resp, "response must be nil when disabled")
-				require.Error(t, err)
-				require.ErrorContains(t, err, "graphiti is not enabled")
+			name: "a recent context search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.RecentContextSearch(ctx, RecentContextSearchRequest{})
 			},
+			wantErr: true,
+		},
+		{
+			name: "an entity by label search refuses",
+			call: func(ctx context.Context, c *Client) (any, error) {
+				return c.EntityByLabelSearch(ctx, EntityByLabelSearchRequest{})
+			},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			// Create fresh disabled client per subtest to avoid shared state
+
 			client, err := NewClient("", 0, false)
 			require.NoError(t, err)
-			tt.fn(t, client)
+
+			resp, err := tt.call(t.Context(), client)
+			assert.Nil(t, resp, "a disabled client must answer nothing")
+			if tt.wantErr {
+				assert.ErrorContains(t, err, "graphiti is not enabled")
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
+}
+
+func TestClient_AddMessages_ReturnsWhenTheCallerIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	var enteredOnce sync.Once
+	entered := make(chan struct{})
+	released := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthcheck" {
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		enteredOnce.Do(func() { close(entered) })
+		<-released
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(released) })
+
+	client, err := NewClient(server.URL, time.Minute, true)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	answered := make(chan error, 1)
+	go func() { answered <- client.AddMessages(ctx, AddMessagesRequest{}) }()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the knowledge graph")
+	}
+	cancel()
+
+	select {
+	case err := <-answered:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the caller kept waiting for a knowledge-graph request after it was cancelled")
+	}
+}
+
+func TestClient_AwaitCall_KeepsWhatAFinishedCallReturned(t *testing.T) {
+	t.Parallel()
+
+	value, err := awaitCall(context.Background(), func() (int, error) { return 7, nil })
+	require.NoError(t, err)
+	assert.Equal(t, 7, value)
+
+	unreachable := errors.New("graph is unreachable")
+	_, err = awaitCall(context.Background(), func() (int, error) { return 0, unreachable })
+	assert.ErrorIs(t, err, unreachable)
 }

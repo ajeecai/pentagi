@@ -1,7 +1,5 @@
-import { zodResolver } from '@hookform/resolvers/zod';
 import { FolderInput } from 'lucide-react';
 import { useEffect, useMemo } from 'react';
-import { useForm } from 'react-hook-form';
 
 import type { FileNode } from '@/components/shared/file-manager';
 import type { OverwriteConflict } from '@/components/shared/overwrite';
@@ -11,8 +9,10 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { useAppForm } from '@/hooks/use-app-form';
 import { useResources } from '@/providers/resources-provider';
 
+import { computeCommonParent, computeTargets } from './resources-utils';
 import { resourcesMoveFormSchema, type ResourcesMoveFormValues, useResourcesMove } from './use-resources-move';
 
 interface MovePlan {
@@ -42,27 +42,12 @@ interface ResourcesMoveDialogProps {
     onClose: () => void;
 }
 
-/** Parent directory of a virtual path; `''` for root. Mirrors `getParentDir` from the DnD hook. */
-const getParentDir = (path: string): string => {
-    const idx = path.lastIndexOf('/');
-
-    return idx === -1 ? '' : path.slice(0, idx);
-};
-
 /**
  * Default destination directory for a multi-file move. Use the common parent
  * directory when every selected file lives under the same one (so the user
  * sees "where things came from"); otherwise default to the library root so
  * they don't have to first clear an unrelated path.
  */
-const computeCommonParent = (files: readonly [FileNode, ...FileNode[]]): string => {
-    const first = getParentDir(files[0].path);
-
-    return files.every((file) => getParentDir(file.path) === first) ? first : '';
-};
-
-const splitName = (path: string): string => path.split('/').pop() ?? path;
-
 /**
  * Pre-compute the per-file destinations the backend will write to. This mirrors
  * the server's resolution rules so the client can preflight against the local
@@ -74,23 +59,6 @@ const splitName = (path: string): string => path.split('/').pop() ?? path;
  *   - 2+ sources                → destination is always a base directory;
  *                                 each source lands at `<dir>/<file.name>`.
  */
-const computeTargets = (files: readonly [FileNode, ...FileNode[]], destination: string): OverwriteConflict[] => {
-    const trimmed = destination.trim();
-    const treatAsDir = files.length > 1 || (trimmed.length > 1 && trimmed.endsWith('/'));
-
-    if (treatAsDir) {
-        const baseDir = trimmed.replace(/\/+$/, '');
-
-        return files.map((file) => {
-            const dest = baseDir ? `${baseDir}/${file.name}` : file.name;
-
-            return { destination: dest, destinationName: file.name };
-        });
-    }
-
-    return [{ destination: trimmed, destinationName: splitName(trimmed) }];
-};
-
 const buildMovePlan = (files: readonly [FileNode, ...FileNode[]], values: ResourcesMoveFormValues): MovePlan => ({
     destination: values.destination.trim(),
     sources: files.map((file) => file.path),
@@ -139,18 +107,15 @@ function ResourcesMoveDialogForm({ files, onClose }: ResourcesMoveDialogFormProp
         return files[0].path;
     }, [files, isMulti]);
 
-    const form = useForm<ResourcesMoveFormValues>({
+    const form = useAppForm<ResourcesMoveFormValues>({
         defaultValues: { destination: defaultDestination },
-        mode: 'onChange',
-        resolver: zodResolver(resourcesMoveFormSchema),
+        schema: resourcesMoveFormSchema,
     });
 
     useEffect(() => {
         form.reset({ destination: defaultDestination });
     }, [defaultDestination, form]);
 
-    // Lazy snapshot of every existing resource path. Recomputed only when the
-    // library changes; reused by `findConflicts` for the local preflight.
     const resourcePaths = useMemo(() => new Set(resources.map((resource) => resource.path)), [resources]);
     const sourcePaths = useMemo(() => new Set(files.map((file) => file.path)), [files]);
 
@@ -180,7 +145,9 @@ function ResourcesMoveDialogForm({ files, onClose }: ResourcesMoveDialogFormProp
         await overwriteAction.forceExecute(buildMovePlan(files, values));
     });
 
-    const isSubmitDisabled = !form.formState.isValid;
+    // Convention: stay enabled until the first submit, then reflect validity (so an invalid submit surfaces
+    // errors instead of a silently-dead button). Mirrors FormSubmitButton's requireValid gate.
+    const isSubmitDisabled = form.formState.isSubmitted && !form.formState.isValid;
     const titleText = isMulti
         ? `Move ${files.length} items`
         : files[0].isDir
@@ -210,6 +177,7 @@ function ResourcesMoveDialogForm({ files, onClose }: ResourcesMoveDialogFormProp
                 <Form {...form}>
                     <form
                         className="flex flex-col gap-4"
+                        noValidate
                         onSubmit={handleSave}
                     >
                         <FormField

@@ -1,8 +1,10 @@
 import { type KeyboardEvent as ReactKeyboardEvent, useCallback } from 'react';
 
+import { clamp } from '@/lib/clamp';
+
 import type { FileManagerInternalNode, FileNode } from './file-manager-types';
 
-import { clamp, collectSubtreePaths, findNodeByPath } from './file-manager-utils';
+import { collectSubtreePaths, findNodeByPath } from './file-manager-utils';
 
 interface UseFileManagerKeyboardNavigationArgs {
     expandedPaths: Set<string>;
@@ -11,7 +13,6 @@ interface UseFileManagerKeyboardNavigationArgs {
     focusRow: (path: null | string) => void;
     isCheckboxVisible: boolean;
     onClearSelection: () => void;
-    /** Open handler for file rows (Enter). */
     onOpen?: (file: FileNode) => void;
     /**
      * Open handler for directory rows (Enter). When set, replaces the default
@@ -24,7 +25,6 @@ interface UseFileManagerKeyboardNavigationArgs {
     onToggleExpand: (path: string, wasExpanded: boolean) => void;
     /** Polymorphic selection toggle — same shape as the row checkbox handler. */
     onToggleSelection: (path: string, subtreePaths?: readonly string[]) => void;
-    /** Currently focused row, or `null` if nothing is focused. */
     resolvedActiveRow: null | string;
     visibleTree: FileManagerInternalNode[];
 }

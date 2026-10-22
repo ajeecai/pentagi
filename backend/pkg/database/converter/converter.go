@@ -2,16 +2,19 @@ package converter
 
 import (
 	"encoding/json"
+	"time"
 
 	"pentagi/pkg/database"
 	"pentagi/pkg/graph/model"
 	"pentagi/pkg/providers/pconfig"
+	"pentagi/pkg/providers/provider"
 	"pentagi/pkg/providers/tester"
-	"pentagi/pkg/providers/tester/testdata"
+	"pentagi/pkg/providers/tester/cases"
 	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
 
 	"github.com/vxcontrol/langchaingo/llms"
+	"github.com/vxcontrol/langchaingo/llms/reasoning"
 )
 
 func ConvertFlows(flows []database.Flow, containers []database.Container) []*model.Flow {
@@ -35,6 +38,7 @@ func ConvertFlow(flow database.Flow, containers []database.Container) *model.Flo
 	}
 	return &model.Flow{
 		ID:        flow.ID,
+		UserID:    flow.UserID,
 		Title:     flow.Title,
 		Status:    model.StatusType(flow.Status),
 		Terminals: ConvertContainers(containers),
@@ -452,6 +456,14 @@ func ConvertUserPreferences(pref database.UserPreference) *model.UserPreferences
 	}
 }
 
+func apiTokenStatus(status database.TokenStatus, createdAt time.Time, ttl int64) model.TokenStatus {
+	if status == database.TokenStatusActive && database.IsAPITokenExpired(createdAt, ttl) {
+		return model.TokenStatusExpired
+	}
+
+	return model.TokenStatus(status)
+}
+
 func ConvertAPIToken(token database.ApiToken) *model.APIToken {
 	var name *string
 	if token.Name.Valid {
@@ -465,7 +477,7 @@ func ConvertAPIToken(token database.ApiToken) *model.APIToken {
 		RoleID:    token.RoleID,
 		Name:      name,
 		TTL:       int(token.Ttl),
-		Status:    model.TokenStatus(token.Status),
+		Status:    apiTokenStatus(token.Status, token.CreatedAt.Time, token.Ttl),
 		CreatedAt: token.CreatedAt.Time,
 		UpdatedAt: token.UpdatedAt.Time,
 	}
@@ -484,7 +496,7 @@ func ConvertAPITokenRemoveSecret(token database.APITokenWithSecret) *model.APITo
 		RoleID:    token.RoleID,
 		Name:      name,
 		TTL:       int(token.Ttl),
-		Status:    model.TokenStatus(token.Status),
+		Status:    apiTokenStatus(token.Status, token.CreatedAt.Time, token.Ttl),
 		CreatedAt: token.CreatedAt.Time,
 		UpdatedAt: token.UpdatedAt.Time,
 	}
@@ -503,7 +515,7 @@ func ConvertAPITokenWithSecret(token database.APITokenWithSecret) *model.APIToke
 		RoleID:    token.RoleID,
 		Name:      name,
 		TTL:       int(token.Ttl),
-		Status:    model.TokenStatus(token.Status),
+		Status:    apiTokenStatus(token.Status, token.CreatedAt.Time, token.Ttl),
 		CreatedAt: token.CreatedAt.Time,
 		UpdatedAt: token.UpdatedAt.Time,
 		Token:     token.Token,
@@ -537,7 +549,11 @@ func ConvertFlowTemplates(templates []database.FlowTemplate) []*model.FlowTempla
 	return result
 }
 
-func ConvertModels(models pconfig.ModelsConfig) []*model.ModelConfig {
+func ConvertModels(models pconfig.ModelsConfig, rp reasoning.Provider) []*model.ModelConfig {
+	return ConvertModelsWithPrefix(models, rp, "")
+}
+
+func ConvertModelsWithPrefix(models pconfig.ModelsConfig, rp reasoning.Provider, prefix string) []*model.ModelConfig {
 	gmodels := make([]*model.ModelConfig, 0, len(models))
 	for _, m := range models {
 		modelConfig := &model.ModelConfig{
@@ -562,11 +578,89 @@ func ConvertModels(models pconfig.ModelsConfig) []*model.ModelConfig {
 		if m.Thinking != nil {
 			modelConfig.Thinking = m.Thinking
 		}
+		modelConfig.ContextWindow = m.ContextWindow
+		modelConfig.MaxOutputTokens = m.MaxOutputTokens
+		rejectsEffortWithTools := rp == reasoning.ProviderOpenAI &&
+			reasoning.EffortWithTools(m.Name) != reasoning.EffortToolsFree
+		// Surface reasoning capability for any thinking-capable model, not only
+		// those with an explicit reasoning block: models like Gemini declare
+		// thinking:true with no reasoning section, yet Off (thinkingBudget:0) is
+		// meaningful and supported.
+		if m.Reasoning != nil || (m.Thinking != nil && *m.Thinking) || (m.Thinking == nil && rejectsEffortWithTools) {
+			reasoningInfo := &model.ModelReasoningInfo{}
+			if m.Reasoning != nil {
+				if m.Reasoning.Mode != pconfig.ModelReasoningNone {
+					mode := convertModelReasoningMode(m.Reasoning.Mode)
+					reasoningInfo.Mode = &mode
+				}
+				// The catalog also lists the values that switch thinking off (openai
+				// none): they are not levels, and the UI reads them through
+				// CannotDisable instead.
+				for _, effort := range m.Reasoning.Efforts {
+					if level := model.ReasoningEffort(effort); level.IsValid() {
+						reasoningInfo.Efforts = append(reasoningInfo.Efforts, level)
+					}
+				}
+			}
+			// Capability is derived from the langchaingo reasoning tables (single
+			// source of truth). cannotDisable reports whether Off would take no
+			// effect — either the API rejects it, or the disable wire is omitted on
+			// a model that is NOT off by default (an unclassified default-on model
+			// where Off is a silent no-op) — so the UI only offers Off when it works.
+			support := llms.ReasoningSupportFor(m.Name, rp)
+			if len(reasoningInfo.Efforts) == 0 {
+				for _, effort := range support.Efforts {
+					if level := model.ReasoningEffort(effort); level.IsValid() {
+						reasoningInfo.Efforts = append(reasoningInfo.Efforts, level)
+					}
+				}
+			}
+			supported := support.Supported
+			cannotDisable := !offEffective(reasoning.ResolveOff(m.Name, rp), support.DefaultOn)
+			reasoningInfo.Supported = &supported
+			reasoningInfo.CannotDisable = &cannotDisable
+			reasoningInfo.DefaultOn = support.DefaultOn
+			reasoningInfo.RejectsEffortWithTools = &rejectsEffortWithTools
+			takesNoThinkingDepth := rp == reasoning.ProviderOpenAI &&
+				reasoning.TakesNoThinkingDepth(provider.ApplyModelPrefix(m.Name, prefix))
+			reasoningInfo.TakesNoThinkingDepth = &takesNoThinkingDepth
+			modelConfig.Reasoning = reasoningInfo
+		}
 
 		gmodels = append(gmodels, modelConfig)
 	}
 
 	return gmodels
+}
+
+// offEffective reports whether turning reasoning Off actually disables thinking:
+// a real disable wire always does; an omitted wire only does when the model is
+// known to be off by default. A silent no-op (unclassified default-on model) or an
+// API rejection (OffUnsupported) does not, so the UI must not offer Off there.
+func offEffective(off reasoning.OffWire, defaultOn *bool) bool {
+	switch off {
+	case reasoning.OffDisableClaude, reasoning.OffZeroBudget, reasoning.OffEffortNone,
+		reasoning.OffDisableThinkingObject, reasoning.OffDisableDashScope, reasoning.OffMinimalLevel,
+		reasoning.OffDisableThinkBool:
+		return true
+	case reasoning.OffOmit:
+		return defaultOn != nil && !*defaultOn
+	default: // OffUnsupported
+		return false
+	}
+}
+
+// Bridges the one spelling difference between the pconfig and GraphQL reasoning
+// enums: adaptive-only (hyphen) vs adaptive_only (underscore).
+func convertModelReasoningMode(m pconfig.ModelReasoningMode) model.ModelReasoningMode {
+	switch m {
+	case pconfig.ModelReasoningAdaptiveOnly:
+		return model.ModelReasoningModeAdaptiveOnly
+	case pconfig.ModelReasoningAdaptive:
+		return model.ModelReasoningModeAdaptive
+	default:
+		return model.ModelReasoningModeBudget
+	}
 }
 
 func ConvertProvider(prv database.Provider, cfg *pconfig.ProviderConfig) *model.ProviderConfig {
@@ -618,37 +712,53 @@ func ConvertAgentConfigToGqlModel(ac *pconfig.AgentConfig) *model.AgentConfig {
 		Model: ac.Model,
 	}
 
-	if ac.MaxTokens != 0 {
+	if ac.IsSet("max_tokens") {
 		result.MaxTokens = &ac.MaxTokens
 	}
-	if ac.Temperature != 0 {
+	if ac.IsSet("temperature") {
 		result.Temperature = &ac.Temperature
 	}
-	if ac.TopK != 0 {
+	if ac.IsSet("top_k") {
 		result.TopK = &ac.TopK
 	}
-	if ac.TopP != 0 {
+	if ac.IsSet("top_p") {
 		result.TopP = &ac.TopP
 	}
-	if ac.MinLength != 0 {
+	if ac.IsSet("min_length") {
 		result.MinLength = &ac.MinLength
 	}
-	if ac.MaxLength != 0 {
+	if ac.IsSet("max_length") {
 		result.MaxLength = &ac.MaxLength
 	}
-	if ac.RepetitionPenalty != 0 {
+	if ac.IsSet("repetition_penalty") {
 		result.RepetitionPenalty = &ac.RepetitionPenalty
 	}
-	if ac.FrequencyPenalty != 0 {
+	if ac.IsSet("frequency_penalty") {
 		result.FrequencyPenalty = &ac.FrequencyPenalty
 	}
-	if ac.PresencePenalty != 0 {
+	if ac.IsSet("presence_penalty") {
 		result.PresencePenalty = &ac.PresencePenalty
 	}
+	if ac.IsSet("min_p") {
+		result.MinP = &ac.MinP
+	}
+	if ac.IsSet("n") {
+		result.N = &ac.N
+	}
+	if ac.IsSet("json") {
+		result.JSON = &ac.JSON
+	}
+	if ac.IsSet("response_mime_type") {
+		result.ResponseMimeType = &ac.ResponseMIMEType
+	}
 
-	if ac.Reasoning.Effort != llms.ReasoningNone || ac.Reasoning.MaxTokens != 0 {
+	if !ac.Reasoning.IsZero() {
 		reasoning := &model.ReasoningConfig{}
 
+		if ac.Reasoning.Mode != pconfig.ReasoningModeDefault {
+			mode := model.ReasoningMode(ac.Reasoning.Mode)
+			reasoning.Mode = &mode
+		}
 		if ac.Reasoning.Effort != llms.ReasoningNone {
 			effort := model.ReasoningEffort(ac.Reasoning.Effort)
 			reasoning.Effort = &effort
@@ -667,6 +777,10 @@ func ConvertAgentConfigToGqlModel(ac *pconfig.AgentConfig) *model.AgentConfig {
 			CacheRead:  ac.Price.CacheRead,
 			CacheWrite: ac.Price.CacheWrite,
 		}
+	}
+
+	if ac.ExtraBody != nil {
+		result.ExtraBody = ac.ExtraBody
 	}
 
 	return result
@@ -744,9 +858,27 @@ func ConvertAgentConfigFromGqlModel(ac *model.AgentConfig) *pconfig.AgentConfig 
 	if ac.PresencePenalty != nil {
 		rawConfig["presence_penalty"] = *ac.PresencePenalty
 	}
+	// BuildOptions gates these on the key being present, not on its value, so a zero has to be
+	// written as an absent key — otherwise `json: false` would switch JSON mode on and `n: 0`
+	// would emit an invalid request parameter.
+	if ac.MinP != nil && *ac.MinP != 0 {
+		rawConfig["min_p"] = *ac.MinP
+	}
+	if ac.N != nil && *ac.N != 0 {
+		rawConfig["n"] = *ac.N
+	}
+	if ac.JSON != nil && *ac.JSON {
+		rawConfig["json"] = *ac.JSON
+	}
+	if ac.ResponseMimeType != nil && *ac.ResponseMimeType != "" {
+		rawConfig["response_mime_type"] = *ac.ResponseMimeType
+	}
 
 	if ac.Reasoning != nil {
 		reasoning := map[string]any{}
+		if ac.Reasoning.Mode != nil {
+			reasoning["mode"] = pconfig.ReasoningMode(*ac.Reasoning.Mode)
+		}
 		if ac.Reasoning.Effort != nil {
 			reasoning["effort"] = llms.ReasoningEffort(*ac.Reasoning.Effort)
 		}
@@ -765,6 +897,10 @@ func ConvertAgentConfigFromGqlModel(ac *model.AgentConfig) *pconfig.AgentConfig 
 		}
 	}
 
+	if ac.ExtraBody != nil {
+		rawConfig["extra_body"] = ac.ExtraBody
+	}
+
 	jsonConfig, err := json.Marshal(rawConfig)
 	if err != nil {
 		return nil
@@ -779,7 +915,7 @@ func ConvertAgentConfigFromGqlModel(ac *model.AgentConfig) *pconfig.AgentConfig 
 	return &result
 }
 
-func ConvertTestResult(result testdata.TestResult) *model.TestResult {
+func ConvertTestResult(result cases.TestResult) *model.TestResult {
 	var (
 		errString *string
 		latency   *int
@@ -841,9 +977,7 @@ type UsageStatsRow interface {
 		database.GetTaskUsageStatsRow |
 		database.GetSubtaskUsageStatsRow |
 		database.GetUserTotalUsageStatsRow |
-		database.GetUsageStatsByDayLastWeekRow |
-		database.GetUsageStatsByDayLastMonthRow |
-		database.GetUsageStatsByDayLast3MonthsRow |
+		database.GetUsageStatsByDayRow |
 		database.GetUsageStatsByProviderRow |
 		database.GetUsageStatsByModelRow |
 		database.GetUsageStatsByTypeRow |
@@ -873,7 +1007,6 @@ func ConvertUsageStats[T UsageStatsRow](stats T) *model.UsageStats {
 	var in, out, cacheIn, cacheOut int64
 	var costIn, costOut float64
 
-	// Extract fields based on type
 	switch v := any(stats).(type) {
 	case database.GetFlowUsageStatsRow:
 		in, out = v.TotalUsageIn, v.TotalUsageOut
@@ -891,15 +1024,7 @@ func ConvertUsageStats[T UsageStatsRow](stats T) *model.UsageStats {
 		in, out = v.TotalUsageIn, v.TotalUsageOut
 		cacheIn, cacheOut = v.TotalUsageCacheIn, v.TotalUsageCacheOut
 		costIn, costOut = v.TotalUsageCostIn, v.TotalUsageCostOut
-	case database.GetUsageStatsByDayLastWeekRow:
-		in, out = v.TotalUsageIn, v.TotalUsageOut
-		cacheIn, cacheOut = v.TotalUsageCacheIn, v.TotalUsageCacheOut
-		costIn, costOut = v.TotalUsageCostIn, v.TotalUsageCostOut
-	case database.GetUsageStatsByDayLastMonthRow:
-		in, out = v.TotalUsageIn, v.TotalUsageOut
-		cacheIn, cacheOut = v.TotalUsageCacheIn, v.TotalUsageCacheOut
-		costIn, costOut = v.TotalUsageCostIn, v.TotalUsageCostOut
-	case database.GetUsageStatsByDayLast3MonthsRow:
+	case database.GetUsageStatsByDayRow:
 		in, out = v.TotalUsageIn, v.TotalUsageOut
 		cacheIn, cacheOut = v.TotalUsageCacheIn, v.TotalUsageCacheOut
 		costIn, costOut = v.TotalUsageCostIn, v.TotalUsageCostOut
@@ -932,31 +1057,7 @@ func ConvertUsageStats[T UsageStatsRow](stats T) *model.UsageStats {
 }
 
 // ConvertDailyUsageStats converts daily usage stats to GraphQL model
-func ConvertDailyUsageStats(stats []database.GetUsageStatsByDayLastWeekRow) []*model.DailyUsageStats {
-	result := make([]*model.DailyUsageStats, 0, len(stats))
-	for _, stat := range stats {
-		result = append(result, &model.DailyUsageStats{
-			Date:  stat.Date,
-			Stats: ConvertUsageStats(stat),
-		})
-	}
-	return result
-}
-
-// ConvertDailyUsageStatsMonth converts monthly usage stats to GraphQL model
-func ConvertDailyUsageStatsMonth(stats []database.GetUsageStatsByDayLastMonthRow) []*model.DailyUsageStats {
-	result := make([]*model.DailyUsageStats, 0, len(stats))
-	for _, stat := range stats {
-		result = append(result, &model.DailyUsageStats{
-			Date:  stat.Date,
-			Stats: ConvertUsageStats(stat),
-		})
-	}
-	return result
-}
-
-// ConvertDailyUsageStatsQuarter converts quarterly usage stats to GraphQL model
-func ConvertDailyUsageStatsQuarter(stats []database.GetUsageStatsByDayLast3MonthsRow) []*model.DailyUsageStats {
+func ConvertDailyUsageStats(stats []database.GetUsageStatsByDayRow) []*model.DailyUsageStats {
 	result := make([]*model.DailyUsageStats, 0, len(stats))
 	for _, stat := range stats {
 		result = append(result, &model.DailyUsageStats{
@@ -1048,7 +1149,6 @@ func ConvertToolcallsStats[T ToolcallsStatsRow](stats T) *model.ToolcallsStats {
 	var count int64
 	var duration float64
 
-	// Extract fields based on type
 	switch v := any(stats).(type) {
 	case database.GetFlowToolcallsStatsRow:
 		count, duration = v.TotalCount, v.TotalDurationSeconds
@@ -1066,38 +1166,7 @@ func ConvertToolcallsStats[T ToolcallsStatsRow](stats T) *model.ToolcallsStats {
 	}
 }
 
-// ConvertDailyToolcallsStats converts daily toolcalls stats to GraphQL model
-func ConvertDailyToolcallsStatsWeek(stats []database.GetToolcallsStatsByDayLastWeekRow) []*model.DailyToolcallsStats {
-	result := make([]*model.DailyToolcallsStats, 0, len(stats))
-	for _, stat := range stats {
-		result = append(result, &model.DailyToolcallsStats{
-			Date: stat.Date,
-			Stats: &model.ToolcallsStats{
-				TotalCount:           int(stat.TotalCount),
-				TotalDurationSeconds: stat.TotalDurationSeconds,
-			},
-		})
-	}
-	return result
-}
-
-// ConvertDailyToolcallsStatsMonth converts monthly toolcalls stats to GraphQL model
-func ConvertDailyToolcallsStatsMonth(stats []database.GetToolcallsStatsByDayLastMonthRow) []*model.DailyToolcallsStats {
-	result := make([]*model.DailyToolcallsStats, 0, len(stats))
-	for _, stat := range stats {
-		result = append(result, &model.DailyToolcallsStats{
-			Date: stat.Date,
-			Stats: &model.ToolcallsStats{
-				TotalCount:           int(stat.TotalCount),
-				TotalDurationSeconds: stat.TotalDurationSeconds,
-			},
-		})
-	}
-	return result
-}
-
-// ConvertDailyToolcallsStatsQuarter converts quarterly toolcalls stats to GraphQL model
-func ConvertDailyToolcallsStatsQuarter(stats []database.GetToolcallsStatsByDayLast3MonthsRow) []*model.DailyToolcallsStats {
+func ConvertDailyToolcallsStats(stats []database.GetToolcallsStatsByDayRow) []*model.DailyToolcallsStats {
 	result := make([]*model.DailyToolcallsStats, 0, len(stats))
 	for _, stat := range stats {
 		result = append(result, &model.DailyToolcallsStats{
@@ -1118,7 +1187,6 @@ func isAgentTool(functionName string) bool {
 	if !exists {
 		return false
 	}
-	// Agent tools include AgentToolType and StoreAgentResultToolType
 	return toolType == tools.AgentToolType || toolType == tools.StoreAgentResultToolType
 }
 
@@ -1158,7 +1226,6 @@ func ConvertFunctionToolcallsStatsForFlow(stats []database.GetToolcallsStatsByFu
 func ConvertFlowsStats[T FlowsStatsRow](stats T) *model.FlowsStats {
 	var flowsCount, tasksCount, subtasksCount, assistantsCount int64
 
-	// Extract fields based on type
 	switch v := any(stats).(type) {
 	case database.GetUserTotalFlowsStatsRow:
 		flowsCount, tasksCount, subtasksCount, assistantsCount = v.TotalFlowsCount, v.TotalTasksCount, v.TotalSubtasksCount, v.TotalAssistantsCount
@@ -1176,7 +1243,6 @@ func ConvertFlowsStats[T FlowsStatsRow](stats T) *model.FlowsStats {
 func ConvertFlowStats[T FlowStatsRow](stats T) *model.FlowStats {
 	var tasksCount, subtasksCount, assistantsCount int64
 
-	// Extract fields based on type
 	switch v := any(stats).(type) {
 	case database.GetFlowStatsRow:
 		tasksCount, subtasksCount, assistantsCount = v.TotalTasksCount, v.TotalSubtasksCount, v.TotalAssistantsCount
@@ -1190,41 +1256,7 @@ func ConvertFlowStats[T FlowStatsRow](stats T) *model.FlowStats {
 }
 
 // ConvertDailyFlowsStatsWeek converts daily flows stats to GraphQL model
-func ConvertDailyFlowsStatsWeek(stats []database.GetFlowsStatsByDayLastWeekRow) []*model.DailyFlowsStats {
-	result := make([]*model.DailyFlowsStats, 0, len(stats))
-	for _, stat := range stats {
-		result = append(result, &model.DailyFlowsStats{
-			Date: stat.Date,
-			Stats: &model.FlowsStats{
-				TotalFlowsCount:      int(stat.TotalFlowsCount),
-				TotalTasksCount:      int(stat.TotalTasksCount),
-				TotalSubtasksCount:   int(stat.TotalSubtasksCount),
-				TotalAssistantsCount: int(stat.TotalAssistantsCount),
-			},
-		})
-	}
-	return result
-}
-
-// ConvertDailyFlowsStatsMonth converts monthly flows stats to GraphQL model
-func ConvertDailyFlowsStatsMonth(stats []database.GetFlowsStatsByDayLastMonthRow) []*model.DailyFlowsStats {
-	result := make([]*model.DailyFlowsStats, 0, len(stats))
-	for _, stat := range stats {
-		result = append(result, &model.DailyFlowsStats{
-			Date: stat.Date,
-			Stats: &model.FlowsStats{
-				TotalFlowsCount:      int(stat.TotalFlowsCount),
-				TotalTasksCount:      int(stat.TotalTasksCount),
-				TotalSubtasksCount:   int(stat.TotalSubtasksCount),
-				TotalAssistantsCount: int(stat.TotalAssistantsCount),
-			},
-		})
-	}
-	return result
-}
-
-// ConvertDailyFlowsStatsQuarter converts quarterly flows stats to GraphQL model
-func ConvertDailyFlowsStatsQuarter(stats []database.GetFlowsStatsByDayLast3MonthsRow) []*model.DailyFlowsStats {
+func ConvertDailyFlowsStats(stats []database.GetFlowsStatsByDayRow) []*model.DailyFlowsStats {
 	result := make([]*model.DailyFlowsStats, 0, len(stats))
 	for _, stat := range stats {
 		result = append(result, &model.DailyFlowsStats{

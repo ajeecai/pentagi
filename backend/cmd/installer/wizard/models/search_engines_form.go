@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"pentagi/cmd/installer/loader"
@@ -86,13 +87,11 @@ func (m *SearchEnginesFormModel) BuildForm() tea.Cmd {
 		config.PerplexityAPIKey,
 	))
 
-	// Perplexity Model (suggestions)
-	fields = append(fields, m.createSelectTextField(
+	fields = append(fields, m.createTextField(
 		"perplexity_model",
 		"Perplexity Model",
-		"Select Perplexity model",
+		"Perplexity chat/completions model (sonar, sonar-pro, ...); empty defaults to sonar",
 		config.PerplexityModel,
-		[]string{"sonar", "sonar-pro", "sonar-reasoning", "sonar-reasoning-pro", "sonar-deep-research"},
 		false,
 	))
 
@@ -106,11 +105,34 @@ func (m *SearchEnginesFormModel) BuildForm() tea.Cmd {
 		false,
 	))
 
+	fields = append(fields, m.createTextField(
+		"perplexity_timeout",
+		locale.ToolsSearchEnginesPerplexityTimeout,
+		locale.ToolsSearchEnginesPerplexityTimeoutDesc,
+		config.PerplexityTimeout,
+		false,
+	))
+
 	// Tavily API Key
 	fields = append(fields, m.createAPIKeyField("tavily_api_key",
 		locale.ToolsSearchEnginesTavilyKey,
 		locale.ToolsSearchEnginesTavilyKeyDesc,
 		config.TavilyAPIKey,
+	))
+
+	// Firecrawl API Key
+	fields = append(fields, m.createAPIKeyField("firecrawl_api_key",
+		locale.ToolsSearchEnginesFirecrawlKey,
+		locale.ToolsSearchEnginesFirecrawlKeyDesc,
+		config.FirecrawlAPIKey,
+	))
+
+	// Firecrawl API URL (optional, for self-hosted deployments)
+	fields = append(fields, m.createTextField("firecrawl_api_url",
+		locale.ToolsSearchEnginesFirecrawlURL,
+		locale.ToolsSearchEnginesFirecrawlURLDesc,
+		config.FirecrawlAPIURL,
+		false,
 	))
 
 	// Traversaal API Key
@@ -192,9 +214,43 @@ func (m *SearchEnginesFormModel) BuildForm() tea.Cmd {
 		false,
 	))
 
+	// Internal Analytics Engine (boolean, opt-in browser-based fallback)
+	fields = append(fields, m.createBooleanField("internal_enabled",
+		locale.ToolsSearchEnginesInternalEnabled,
+		locale.ToolsSearchEnginesInternalEnabledDesc,
+		config.WebSearchInternalEnabled,
+	))
+
+	// Internal Engine Max Sites
+	fields = append(fields, m.createIntegerField("internal_max_sites",
+		locale.ToolsSearchEnginesInternalMaxSites,
+		locale.ToolsSearchEnginesInternalMaxSitesDesc,
+		config.WebSearchInternalMaxSites,
+		internalMaxSitesMin,
+		internalMaxSitesMax,
+	))
+
+	// Internal Engine Max Site Bytes
+	fields = append(fields, m.createIntegerField("internal_max_site_bytes",
+		locale.ToolsSearchEnginesInternalMaxSiteBytes,
+		locale.ToolsSearchEnginesInternalMaxSiteBytesDesc,
+		config.WebSearchInternalMaxSiteBytes,
+		internalMaxSiteBytesMin,
+		internalMaxSiteBytesMax,
+	))
+
 	m.SetFormFields(fields)
 	return nil
 }
+
+// Bounds for the internal analytics engine's numeric settings, enforced both on the
+// input placeholder (as a hint) and in HandleSave (as validation).
+const (
+	internalMaxSitesMin     = 1
+	internalMaxSitesMax     = 20
+	internalMaxSiteBytesMin = 1024   // 1 KB
+	internalMaxSiteBytesMax = 102400 // 100 KB
+)
 
 func (m *SearchEnginesFormModel) createBooleanField(key, title, description string, envVar loader.EnvVar) FormField {
 	input := NewBooleanInput(m.GetStyles(), m.GetWindow(), envVar)
@@ -244,6 +300,43 @@ func (m *SearchEnginesFormModel) createSelectTextField(key, title, description s
 		Value:       input.Value(),
 		Suggestions: suggestions,
 	}
+}
+
+func (m *SearchEnginesFormModel) createIntegerField(key, title, description string, envVar loader.EnvVar, min, max int) FormField {
+	input := NewTextInput(m.GetStyles(), m.GetWindow(), envVar)
+
+	if envVar.Default != "" {
+		input.Placeholder = fmt.Sprintf("%s (%d-%d)", envVar.Default, min, max)
+	} else {
+		input.Placeholder = fmt.Sprintf("(%d-%d)", min, max)
+	}
+
+	return FormField{
+		Key:         key,
+		Title:       title,
+		Description: description,
+		Required:    false,
+		Masked:      false,
+		Input:       input,
+		Value:       input.Value(),
+	}
+}
+
+func (m *SearchEnginesFormModel) validateIntegerField(value, fieldName string, min, max int) error {
+	if value == "" {
+		return nil
+	}
+
+	intVal, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("invalid integer value for %s: %s", fieldName, value)
+	}
+
+	if intVal < min || intVal > max {
+		return fmt.Errorf("%s must be between %d and %d", fieldName, min, max)
+	}
+
+	return nil
 }
 
 func (m *SearchEnginesFormModel) GetFormTitle() string {
@@ -325,6 +418,15 @@ func (m *SearchEnginesFormModel) GetCurrentConfiguration() string {
 			m.GetStyles().Warning.Render(locale.StatusNotConfigured)))
 	}
 
+	// Firecrawl
+	if config.FirecrawlAPIKey.Value != "" {
+		sections = append(sections, fmt.Sprintf("• Firecrawl: %s",
+			m.GetStyles().Success.Render(locale.StatusConfigured)))
+	} else {
+		sections = append(sections, fmt.Sprintf("• Firecrawl: %s",
+			m.GetStyles().Warning.Render(locale.StatusNotConfigured)))
+	}
+
 	// Traversaal
 	if config.TraversaalAPIKey.Value != "" {
 		sections = append(sections, fmt.Sprintf("• Traversaal: %s",
@@ -350,6 +452,19 @@ func (m *SearchEnginesFormModel) GetCurrentConfiguration() string {
 	} else {
 		sections = append(sections, fmt.Sprintf("• Searxng: %s",
 			m.GetStyles().Warning.Render(locale.StatusNotConfigured)))
+	}
+
+	// Internal Analytics Engine
+	internalEnabled := config.WebSearchInternalEnabled.Value
+	if internalEnabled == "" {
+		internalEnabled = config.WebSearchInternalEnabled.Default
+	}
+	if internalEnabled == "true" {
+		sections = append(sections, fmt.Sprintf("• Internal Analytics Engine: %s",
+			m.GetStyles().Success.Render(locale.StatusEnabled)))
+	} else {
+		sections = append(sections, fmt.Sprintf("• Internal Analytics Engine: %s",
+			m.GetStyles().Warning.Render(locale.StatusDisabled)))
 	}
 
 	sections = append(sections, "")
@@ -384,25 +499,31 @@ func (m *SearchEnginesFormModel) HandleSave() error {
 	// create a working copy of the current config to modify
 	newConfig := &controller.SearchEnginesConfig{
 		// copy current EnvVar fields - they preserve metadata like Line, IsPresent, etc.
-		DuckDuckGoEnabled:     config.DuckDuckGoEnabled,
-		DuckDuckGoRegion:      config.DuckDuckGoRegion,
-		DuckDuckGoSafeSearch:  config.DuckDuckGoSafeSearch,
-		DuckDuckGoTimeRange:   config.DuckDuckGoTimeRange,
-		SploitusEnabled:       config.SploitusEnabled,
-		PerplexityAPIKey:      config.PerplexityAPIKey,
-		PerplexityModel:       config.PerplexityModel,
-		PerplexityContextSize: config.PerplexityContextSize,
-		TavilyAPIKey:          config.TavilyAPIKey,
-		TraversaalAPIKey:      config.TraversaalAPIKey,
-		GoogleAPIKey:          config.GoogleAPIKey,
-		GoogleCXKey:           config.GoogleCXKey,
-		GoogleLRKey:           config.GoogleLRKey,
-		SearxngURL:            config.SearxngURL,
-		SearxngCategories:     config.SearxngCategories,
-		SearxngLanguage:       config.SearxngLanguage,
-		SearxngSafeSearch:     config.SearxngSafeSearch,
-		SearxngTimeRange:      config.SearxngTimeRange,
-		SearxngTimeout:        config.SearxngTimeout,
+		DuckDuckGoEnabled:             config.DuckDuckGoEnabled,
+		DuckDuckGoRegion:              config.DuckDuckGoRegion,
+		DuckDuckGoSafeSearch:          config.DuckDuckGoSafeSearch,
+		DuckDuckGoTimeRange:           config.DuckDuckGoTimeRange,
+		SploitusEnabled:               config.SploitusEnabled,
+		PerplexityAPIKey:              config.PerplexityAPIKey,
+		PerplexityModel:               config.PerplexityModel,
+		PerplexityContextSize:         config.PerplexityContextSize,
+		PerplexityTimeout:             config.PerplexityTimeout,
+		TavilyAPIKey:                  config.TavilyAPIKey,
+		FirecrawlAPIKey:               config.FirecrawlAPIKey,
+		FirecrawlAPIURL:               config.FirecrawlAPIURL,
+		TraversaalAPIKey:              config.TraversaalAPIKey,
+		GoogleAPIKey:                  config.GoogleAPIKey,
+		GoogleCXKey:                   config.GoogleCXKey,
+		GoogleLRKey:                   config.GoogleLRKey,
+		SearxngURL:                    config.SearxngURL,
+		SearxngCategories:             config.SearxngCategories,
+		SearxngLanguage:               config.SearxngLanguage,
+		SearxngSafeSearch:             config.SearxngSafeSearch,
+		SearxngTimeRange:              config.SearxngTimeRange,
+		SearxngTimeout:                config.SearxngTimeout,
+		WebSearchInternalEnabled:      config.WebSearchInternalEnabled,
+		WebSearchInternalMaxSites:     config.WebSearchInternalMaxSites,
+		WebSearchInternalMaxSiteBytes: config.WebSearchInternalMaxSiteBytes,
 	}
 
 	// update field values based on form input
@@ -434,8 +555,19 @@ func (m *SearchEnginesFormModel) HandleSave() error {
 			newConfig.PerplexityModel.Value = value
 		case "perplexity_context_size":
 			newConfig.PerplexityContextSize.Value = value
+		case "perplexity_timeout":
+			if value != "" {
+				if _, err := strconv.Atoi(value); err != nil {
+					return fmt.Errorf("invalid number for Perplexity timeout: %s (seconds)", value)
+				}
+			}
+			newConfig.PerplexityTimeout.Value = value
 		case "tavily_api_key":
 			newConfig.TavilyAPIKey.Value = value
+		case "firecrawl_api_key":
+			newConfig.FirecrawlAPIKey.Value = value
+		case "firecrawl_api_url":
+			newConfig.FirecrawlAPIURL.Value = value
 		case "traversaal_api_key":
 			newConfig.TraversaalAPIKey.Value = value
 		case "google_api_key":
@@ -456,6 +588,25 @@ func (m *SearchEnginesFormModel) HandleSave() error {
 			newConfig.SearxngTimeRange.Value = value
 		case "searxng_timeout":
 			newConfig.SearxngTimeout.Value = value
+		case "internal_enabled":
+			// validate boolean input
+			if value != "" && value != "true" && value != "false" {
+				return fmt.Errorf("invalid boolean value for %s: %s (must be 'true' or 'false')",
+					locale.ToolsSearchEnginesInternalEnabled, value)
+			}
+			newConfig.WebSearchInternalEnabled.Value = value
+		case "internal_max_sites":
+			if err := m.validateIntegerField(value, locale.ToolsSearchEnginesInternalMaxSites,
+				internalMaxSitesMin, internalMaxSitesMax); err != nil {
+				return err
+			}
+			newConfig.WebSearchInternalMaxSites.Value = value
+		case "internal_max_site_bytes":
+			if err := m.validateIntegerField(value, locale.ToolsSearchEnginesInternalMaxSiteBytes,
+				internalMaxSiteBytesMin, internalMaxSiteBytesMax); err != nil {
+				return err
+			}
+			newConfig.WebSearchInternalMaxSiteBytes.Value = value
 		}
 	}
 
@@ -482,11 +633,11 @@ func (m *SearchEnginesFormModel) OnFieldChanged(fieldIndex int, oldValue, newVal
 }
 
 func (m *SearchEnginesFormModel) GetFormFields() []FormField {
-	return m.BaseScreen.fields
+	return m.fields
 }
 
 func (m *SearchEnginesFormModel) SetFormFields(fields []FormField) {
-	m.BaseScreen.fields = fields
+	m.fields = fields
 }
 
 // Update method - handle screen-specific input

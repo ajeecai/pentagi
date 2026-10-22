@@ -10,6 +10,7 @@ import (
 	"pentagi/pkg/server/rdb"
 	"pentagi/pkg/server/response"
 	"pentagi/pkg/templates"
+	"pentagi/pkg/templates/validator"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -81,7 +82,7 @@ func (s *PromptService) GetPrompts(c *gin.Context) {
 		return db.Where("user_id = ?", uid)
 	}
 
-	query.Init("prompts", promptsSQLMappers)
+	_ = query.Init("prompts", promptsSQLMappers)
 
 	if query.Group != "" {
 		if _, ok := promptsSQLMappers[query.Group]; !ok {
@@ -133,7 +134,7 @@ func (s *PromptService) GetPrompts(c *gin.Context) {
 func (s *PromptService) GetPrompt(c *gin.Context) {
 	var (
 		err        error
-		promptType models.PromptType = models.PromptType(c.Param("promptType"))
+		promptType = models.PromptType(c.Param("promptType"))
 		resp       models.Prompt
 	)
 
@@ -192,7 +193,7 @@ func (s *PromptService) PatchPrompt(c *gin.Context) {
 	var (
 		err        error
 		prompt     models.PatchPrompt
-		promptType models.PromptType = models.PromptType(c.Param("promptType"))
+		promptType = models.PromptType(c.Param("promptType"))
 		resp       models.Prompt
 	)
 
@@ -206,6 +207,10 @@ func (s *PromptService) PatchPrompt(c *gin.Context) {
 		return
 	} else if err = promptType.Valid(); err != nil {
 		logger.FromContext(c).WithError(err).Errorf("error validating prompt type '%s'", promptType)
+		response.Error(c, response.ErrPromptsInvalidRequest, err)
+		return
+	} else if err = validator.ValidatePrompt(templates.PromptType(promptType), prompt.Prompt); err != nil {
+		logger.FromContext(c).WithError(err).Errorf("error validating prompt template '%s'", promptType)
 		response.Error(c, response.ErrPromptsInvalidRequest, err)
 		return
 	}
@@ -272,7 +277,7 @@ func (s *PromptService) PatchPrompt(c *gin.Context) {
 func (s *PromptService) ResetPrompt(c *gin.Context) {
 	var (
 		err        error
-		promptType models.PromptType = models.PromptType(c.Param("promptType"))
+		promptType = models.PromptType(c.Param("promptType"))
 		resp       models.Prompt
 	)
 
@@ -312,6 +317,7 @@ func (s *PromptService) ResetPrompt(c *gin.Context) {
 		if err != nil {
 			logger.FromContext(c).WithError(err).Errorf("error creating default prompt by type '%s'", promptType)
 			response.Error(c, response.ErrInternal, err)
+			return
 		}
 
 		response.Success(c, http.StatusCreated, resp)
@@ -349,7 +355,7 @@ func (s *PromptService) ResetPrompt(c *gin.Context) {
 func (s *PromptService) DeletePrompt(c *gin.Context) {
 	var (
 		err        error
-		promptType models.PromptType = models.PromptType(c.Param("promptType"))
+		promptType = models.PromptType(c.Param("promptType"))
 		resp       models.Prompt
 	)
 

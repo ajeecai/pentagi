@@ -2,10 +2,11 @@ import type { AxiosError, AxiosRequestConfig } from 'axios';
 
 import Axios from 'axios';
 
+import { baseUrl } from '@/models/api';
 import { AUTH_STORAGE_KEY } from '@/providers/user-provider';
 
 import { Log } from './log';
-import { getReturnUrlParam } from './utils/auth';
+import { routes } from './routes';
 
 // ── shared API protocol types ────────────────────────────────────────────────
 //
@@ -41,6 +42,10 @@ export interface ApiSuccessResponse<T> {
     status: 'success';
 }
 
+// Must stay longer than the server's own deadline, so the user sees the
+// server's answer rather than an abort of ours on a request still being served.
+const REQUEST_DEADLINE_MS = 45_000;
+
 /**
  * Central axios instance for all REST calls in the app.
  *
@@ -53,11 +58,11 @@ export interface ApiSuccessResponse<T> {
  *     instead of the raw `AxiosResponse<T>`.
  */
 const axios = Axios.create({
-    baseURL: '/api/v1',
+    baseURL: baseUrl,
     headers: {
         'Content-Type': 'application/json',
     },
-    timeout: 30_000,
+    timeout: REQUEST_DEADLINE_MS,
     withCredentials: true,
 });
 
@@ -106,9 +111,8 @@ axios.interceptors.response.use(
 
                     const currentPath = window.location.pathname;
 
-                    if (currentPath !== '/login') {
-                        const returnParam = getReturnUrlParam(currentPath);
-                        window.location.href = `/login${returnParam}`;
+                    if (currentPath !== routes.login()) {
+                        window.location.href = routes.login(currentPath);
                     }
 
                     break;
@@ -129,9 +133,8 @@ axios.interceptors.response.use(
 
                         const currentPath = window.location.pathname;
 
-                        if (currentPath !== '/login') {
-                            const returnParam = getReturnUrlParam(currentPath);
-                            window.location.href = `/login${returnParam}`;
+                        if (currentPath !== routes.login()) {
+                            window.location.href = routes.login(currentPath);
                         }
                     } else {
                         Log.warn(err.response?.data);
@@ -230,10 +233,6 @@ export const getApiErrorMessage = (
 /**
  * Extract the HTTP status code from an unknown error thrown by axios. Returns
  * `undefined` for non-axios errors or when the request never reached a server.
- *
- * Used across hooks that need to branch on a specific status (most commonly
- * 409 conflict) without re-implementing the same `error.statusCode ??
- * error.response?.status` shape every time.
  */
 export const getApiErrorStatusCode = (error: unknown): number | undefined => {
     if (!error || typeof error !== 'object') {
@@ -243,6 +242,26 @@ export const getApiErrorStatusCode = (error: unknown): number | undefined => {
     const httpError = error as ApiHttpError;
 
     return httpError.statusCode ?? httpError.response?.status;
+};
+
+export const getApiErrorCode = (error: unknown): string | undefined => {
+    if (!error || typeof error !== 'object') {
+        return undefined;
+    }
+
+    const responseData = (error as ApiHttpError).response?.data;
+
+    return responseData && typeof responseData === 'object' ? (responseData as ApiErrorResponse).code : undefined;
+};
+
+export const resolveApiErrorMessage = (
+    error: unknown,
+    messagesByCode: Record<string, string>,
+    fallback: string,
+): string => {
+    const code = getApiErrorCode(error);
+
+    return (code && messagesByCode[code]) ?? getApiErrorMessage(error, fallback);
 };
 
 export default axios;

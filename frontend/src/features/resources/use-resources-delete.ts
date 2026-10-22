@@ -3,10 +3,11 @@ import { toast } from 'sonner';
 
 import type { FileNode } from '@/components/shared/file-manager';
 
+import { pluralizeItems } from '@/components/shared/file-manager';
 import { api, getApiErrorMessage } from '@/lib/axios';
 
 import { RESOURCES_API_PATH } from './resources-constants';
-import { buildPathsQuery, pluralizeItems } from './resources-utils';
+import { buildPathsQuery } from './resources-utils';
 
 interface UseResourcesDeleteParams {
     onAfterDelete?: () => void;
@@ -38,10 +39,6 @@ const deleteResourcesRequest = (paths: readonly string[]) =>
     api.delete<void>(`${RESOURCES_API_PATH}?${buildPathsQuery(paths)}`);
 
 /**
- * Owns both the single-resource and bulk-delete flows. The component drives the
- * confirmation dialog state through the returned `fileToDelete`/`requestDelete`/
- * `clearFileToDelete` triple, while the hook hides every API call and toast.
- *
  * No imperative refetch is performed: the GraphQL `resourceDeleted` subscription
  * is wired into the Apollo cache and removes the deleted entries automatically.
  */
@@ -66,8 +63,8 @@ export function useResourcesDelete({ onAfterDelete }: UseResourcesDeleteParams =
                 await deleteResourcesRequest(filesToDelete.map((file) => file.path));
 
                 if (filesToDelete.length === 1) {
-                    const single = filesToDelete[0];
-                    toast.success(single.isDir ? 'Directory deleted' : 'Resource deleted');
+                    const [single] = filesToDelete;
+                    toast.success(single?.isDir ? 'Directory deleted' : 'Resource deleted');
                 } else {
                     toast.success(`${filesToDelete.length} ${pluralizeItems(filesToDelete.length)} deleted`);
                 }

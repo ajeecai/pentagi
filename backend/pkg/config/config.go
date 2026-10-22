@@ -7,37 +7,74 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v10"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/cloud/anonymizer/patterns"
 	"github.com/vxcontrol/cloud/sdk"
 )
 
 type Config struct {
 	// === Core System Configuration ===
-	DatabaseURL string `env:"DATABASE_URL" envDefault:"postgres://pentagiuser:pentagipass@pgvector:5432/pentagidb?sslmode=disable"`
-	Debug       bool   `env:"DEBUG" envDefault:"false"`
-	DataDir     string `env:"DATA_DIR" envDefault:"./data"`
-	AskUser     bool   `env:"ASK_USER" envDefault:"false"`
+	Debug   bool   `env:"DEBUG" envDefault:"false"`
+	DataDir string `env:"DATA_DIR" envDefault:"./data"`
+	AskUser bool   `env:"ASK_USER" envDefault:"false"`
+
+	// TenantID namespaces every externally-visible artifact this instance creates
+	// (PostgreSQL schema, docker object names, Graphiti group ids, telemetry identity)
+	TenantID string `env:"TENANT_ID" envDefault:""`
 
 	// === PentAGI Cloud Service Integration ===
 	InstallationID string `env:"INSTALLATION_ID"`
 	LicenseKey     string `env:"LICENSE_KEY"`
 
 	// === Container Runtime Configuration ===
-	DockerInside                 bool   `env:"DOCKER_INSIDE" envDefault:"false"`
-	DockerNetAdmin               bool   `env:"DOCKER_NET_ADMIN" envDefault:"false"`
-	DockerSocket                 string `env:"DOCKER_SOCKET"`
+	DockerInside   bool   `env:"DOCKER_INSIDE" envDefault:"false"`
+	DockerNetAdmin bool   `env:"DOCKER_NET_ADMIN" envDefault:"false"`
+	DockerSocket   string `env:"DOCKER_SOCKET"`
+
+	// DOCKER_INSIDE_* describe how a worker container reaches a Docker daemon when
+	// DOCKER_INSIDE is enabled. They mirror the DOCKER_HOST / DOCKER_TLS_VERIFY /
+	// DOCKER_CERT_PATH trio that this process itself uses, but apply to the
+	// sandbox rather than to PentAGI, and are injected into it with the _INSIDE
+	// segment stripped from the name.
+	//
+	// Setting DockerInsideHost points sandboxes at a dedicated daemon endpoint
+	// instead of a bind-mounted host socket, which is the safer arrangement: an
+	// agent then talks to whichever daemon the operator designated rather than the
+	// one running PentAGI itself. All three are ignored when DOCKER_INSIDE is off.
+	DockerInsideHost      string `env:"DOCKER_INSIDE_HOST"`
+	DockerInsideTLSVerify string `env:"DOCKER_INSIDE_TLS_VERIFY"`
+	DockerInsideCertPath  string `env:"DOCKER_INSIDE_CERT_PATH"`
+
+	// DockerInsidePolicyTests turns on the sandbox policy tests that run inside
+	// each worker before an agent may use it. Off by default: they need a
+	// DOCKER_INSIDE_HOST whose daemon enforces an authorization policy, and on a
+	// deployment without one every worker would be refused. Operators who run the
+	// separate-daemon arrangement of examples/guides/worker_node.md turn it on to
+	// have that arrangement proven rather than assumed.
+	DockerInsidePolicyTests bool `env:"DOCKER_INSIDE_POLICY_TESTS" envDefault:"false"`
+
 	DockerNetwork                string `env:"DOCKER_NETWORK"`
+	DockerNetworkMode            string `env:"DOCKER_NETWORK_MODE"`
 	DockerPublicIP               string `env:"DOCKER_PUBLIC_IP" envDefault:"0.0.0.0"`
 	DockerWorkDir                string `env:"DOCKER_WORK_DIR"`
+	DockerPortsBase              int    `env:"DOCKER_PORTS_BASE" envDefault:"28000"`
 	DockerDefaultImage           string `env:"DOCKER_DEFAULT_IMAGE" envDefault:"debian:latest"`
 	DockerDefaultImageForPentest string `env:"DOCKER_DEFAULT_IMAGE_FOR_PENTEST" envDefault:"vxcontrol/kali-linux"`
-	DockerNetworkMode            string `env:"DOCKER_NETWORK_MODE"`
-	TerminalToolTimeout          int    `env:"TERMINAL_TOOL_TIMEOUT" envDefault:"1200"`
+
+	// DockerDefaultImageForTest is the worker the startup sandbox check runs in,
+	// and the image it pulls into the sandbox to prove an agent could. It is a
+	// small image on purpose: the check pays for it on every start.
+	DockerDefaultImageForTest string `env:"DOCKER_DEFAULT_IMAGE_FOR_TEST" envDefault:"vxcontrol/kali-linux:test"`
+	DockerImageSelectionMode  string `env:"DOCKER_IMAGE_SELECTION_MODE" envDefault:"llm"`
+	DockerAllowedImages       string `env:"DOCKER_ALLOWED_IMAGES"`
+	LLMFallbackProvider       string `env:"LLM_FALLBACK_PROVIDER"`
+	TerminalToolTimeout       int    `env:"TERMINAL_TOOL_TIMEOUT" envDefault:"1200"`
 
 	// === API Server Configuration ===
 	ServerPort   int    `env:"SERVER_PORT" envDefault:"8080"`
@@ -50,6 +87,8 @@ type Config struct {
 	StaticURL   *url.URL `env:"STATIC_URL"`
 	StaticDir   string   `env:"STATIC_DIR" envDefault:"./fe"`
 	CorsOrigins []string `env:"CORS_ORIGINS" envDefault:"*"`
+
+	TrustedProxies []string `env:"TRUSTED_PROXIES" envSeparator:","`
 
 	// === Authentication & Session Security ===
 	CookieSigningSalt string `env:"COOKIE_SIGNING_SALT"`
@@ -65,6 +104,15 @@ type Config struct {
 	// === LLM Provider: Anthropic ===
 	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
 	AnthropicServerURL string `env:"ANTHROPIC_SERVER_URL" envDefault:"https://api.anthropic.com/v1"`
+
+	// Workload Identity Federation, under the names the vendor SDKs read. A
+	// non-empty ANTHROPIC_API_KEY shadows it.
+	AnthropicFederationRuleID  string `env:"ANTHROPIC_FEDERATION_RULE_ID"`
+	AnthropicOrganizationID    string `env:"ANTHROPIC_ORGANIZATION_ID"`
+	AnthropicServiceAccountID  string `env:"ANTHROPIC_SERVICE_ACCOUNT_ID"`
+	AnthropicWorkspaceID       string `env:"ANTHROPIC_WORKSPACE_ID"`
+	AnthropicIdentityTokenFile string `env:"ANTHROPIC_IDENTITY_TOKEN_FILE"`
+	AnthropicIdentityToken     string `env:"ANTHROPIC_IDENTITY_TOKEN"`
 
 	// === Vector Embedding Configuration ===
 	EmbeddingURL           string `env:"EMBEDDING_URL"`
@@ -91,8 +139,9 @@ type Config struct {
 	LLMServerModel             string `env:"LLM_SERVER_MODEL"`
 	LLMServerProvider          string `env:"LLM_SERVER_PROVIDER"`
 	LLMServerConfig            string `env:"LLM_SERVER_CONFIG_PATH"`
-	LLMServerLegacyReasoning   bool   `env:"LLM_SERVER_LEGACY_REASONING" envDefault:"false"`
 	LLMServerPreserveReasoning bool   `env:"LLM_SERVER_PRESERVE_REASONING" envDefault:"false"`
+	LLMServerAPIType           string `env:"LLM_SERVER_API_TYPE"`
+	LLMServerAPIVersion        string `env:"LLM_SERVER_API_VERSION" envDefault:"2024-10-21"`
 
 	// === LLM Provider: Ollama (Local/Remote) ===
 	OllamaServerURL               string `env:"OLLAMA_SERVER_URL"`
@@ -115,6 +164,7 @@ type Config struct {
 	BedrockSecretKey    string `env:"BEDROCK_SECRET_ACCESS_KEY"`
 	BedrockSessionToken string `env:"BEDROCK_SESSION_TOKEN"`
 	BedrockServerURL    string `env:"BEDROCK_SERVER_URL"`
+	BedrockConfig       string `env:"BEDROCK_CONFIG_PATH"`
 
 	// === LLM Provider: DeepSeek ===
 	DeepSeekAPIKey    string `env:"DEEPSEEK_API_KEY"`
@@ -135,6 +185,21 @@ type Config struct {
 	QwenAPIKey    string `env:"QWEN_API_KEY"`
 	QwenServerURL string `env:"QWEN_SERVER_URL" envDefault:"https://dashscope-us.aliyuncs.com/compatible-mode/v1"`
 	QwenProvider  string `env:"QWEN_PROVIDER"`
+
+	// === LLM Provider: MiniMax ===
+	MiniMaxAPIKey    string `env:"MINIMAX_API_KEY"`
+	MiniMaxServerURL string `env:"MINIMAX_SERVER_URL" envDefault:"https://api.minimax.io/v1"`
+	MiniMaxProvider  string `env:"MINIMAX_PROVIDER"`
+
+	// === LLM Provider: Mistral ===
+	MistralAPIKey    string `env:"MISTRAL_API_KEY"`
+	MistralServerURL string `env:"MISTRAL_SERVER_URL" envDefault:"https://api.mistral.ai/v1"`
+	MistralProvider  string `env:"MISTRAL_PROVIDER"`
+
+	// === LLM Provider: xAI (Grok) ===
+	XAIAPIKey    string `env:"XAI_API_KEY"`
+	XAIServerURL string `env:"XAI_SERVER_URL" envDefault:"https://api.x.ai/v1"`
+	XAIProvider  string `env:"XAI_PROVIDER"`
 
 	// === Search Engine: DuckDuckGo ===
 	DuckDuckGoEnabled    bool   `env:"DUCKDUCKGO_ENABLED" envDefault:"true"`
@@ -168,10 +233,15 @@ type Config struct {
 	// === Search Engine: Tavily AI ===
 	TavilyAPIKey string `env:"TAVILY_API_KEY"`
 
+	// === Search Engine: Firecrawl ===
+	FirecrawlAPIKey string `env:"FIRECRAWL_API_KEY"`
+	FirecrawlAPIURL string `env:"FIRECRAWL_API_URL" envDefault:"https://api.firecrawl.dev"`
+
 	// === Search Engine: Perplexity AI ===
 	PerplexityAPIKey      string `env:"PERPLEXITY_API_KEY"`
 	PerplexityModel       string `env:"PERPLEXITY_MODEL" envDefault:"sonar"`
 	PerplexityContextSize string `env:"PERPLEXITY_CONTEXT_SIZE" envDefault:"low"`
+	PerplexityTimeout     int    `env:"PERPLEXITY_TIMEOUT"`
 
 	// === Search Engine: SearXNG (Self-Hosted) ===
 	SearxngURL        string `env:"SEARXNG_URL"`
@@ -180,6 +250,16 @@ type Config struct {
 	SearxngSafeSearch string `env:"SEARXNG_SAFESEARCH" envDefault:"0"`
 	SearxngTimeRange  string `env:"SEARXNG_TIME_RANGE"`
 	SearxngTimeout    int    `env:"SEARXNG_TIMEOUT"`
+
+	// === Web Search Orchestrator: Internal Analytics Engine ===
+	// The internal analytics engine is an OPTIONAL, opt-in fallback for the
+	// analytic web_search modes (answer/research). It produces a synthesized answer
+	// without a paid analytic API by combining link discovery + the browser scraper
+	// + the summarizer. It is OFF by default because per-page scraping and
+	// summarization can cost more than a purpose-built third-party analytic call.
+	WebSearchInternalEnabled      bool `env:"WEB_SEARCH_INTERNAL_ENABLED" envDefault:"false"`
+	WebSearchInternalMaxSites     int  `env:"WEB_SEARCH_INTERNAL_MAX_SITES" envDefault:"5"`
+	WebSearchInternalMaxSiteBytes int  `env:"WEB_SEARCH_INTERNAL_MAX_SITE_BYTES" envDefault:"10240"`
 
 	// === AI Assistant Mode Configuration ===
 	AssistantUseAgents                bool `env:"ASSISTANT_USE_AGENTS" envDefault:"false"`
@@ -193,6 +273,16 @@ type Config struct {
 	// === Network Proxy Settings ===
 	ProxyURL string `env:"PROXY_URL"`
 
+	// === PentAGI Cloud API ===
+	// UpdateStrategy is the strategy to use for updates. It can be "preview", "stable" or "nightly".
+	UpdateStrategy string `env:"UPDATE_STRATEGY" envDefault:"preview"`
+	// UpdateCheckInterval is how often this server reports its own state. Zero disables it.
+	UpdateCheckInterval time.Duration `env:"UPDATE_CHECK_INTERVAL" envDefault:"3h"`
+	// UpdateServerHost is the endpoint as host[:port]; empty means the default.
+	UpdateServerHost string `env:"UPDATE_SERVER_HOST" envDefault:"update.pentagi.com"`
+	// SupportServerHost is the endpoint as host[:port]; empty means the default.
+	SupportServerHost string `env:"SUPPORT_SERVER_HOST" envDefault:"support.pentagi.com"`
+
 	// SSL Trusted CA Certificate Path (for external communication with LLM backends)
 	ExternalSSLCAPath   string `env:"EXTERNAL_SSL_CA_PATH" envDefault:""`
 	ExternalSSLInsecure bool   `env:"EXTERNAL_SSL_INSECURE" envDefault:"false"`
@@ -203,6 +293,9 @@ type Config struct {
 
 	// === Observability: OpenTelemetry Collector ===
 	TelemetryEndpoint string `env:"OTEL_HOST"`
+
+	// PprofAddr is the pprof listener address. It is empty by default, which means pprof is disabled.
+	PprofAddr string `env:"PPROF_ADDR" envDefault:""`
 
 	// === Observability: Langfuse LLM Analytics ===
 	LangfuseBaseURL   string `env:"LANGFUSE_BASE_URL"`
@@ -227,10 +320,19 @@ type Config struct {
 	// === Agent Planning Phase Configuration ===
 	AgentPlanningStepEnabled bool `env:"AGENT_PLANNING_STEP_ENABLED" envDefault:"false"`
 
+	// === Database Configuration ===
+	DatabaseURL string `env:"DATABASE_URL" envDefault:"postgres://pentagiuser:pentagipass@pgvector:5432/pentagidb?sslmode=disable"`
+
 	// === Database Connection Pool Sizing ===
 	DBMaxOpenConns   int `env:"DATABASE_MAX_OPEN_CONNS" envDefault:"25"`
 	DBMaxIdleConns   int `env:"DATABASE_MAX_IDLE_CONNS" envDefault:"5"`
 	DBVectorMaxConns int `env:"DATABASE_VECTOR_MAX_CONNS" envDefault:"10"`
+
+	// DatabaseExtensionsSchema/DatabaseSearchPathViaOptions only matter with
+	// TenantID set; see backend/docs/config.md -> "Multi-Instance Deployment
+	// (TENANT_ID)" for what they do and when to override them.
+	DatabaseExtensionsSchema     string `env:"DATABASE_EXTENSIONS_SCHEMA" envDefault:""`
+	DatabaseSearchPathViaOptions bool   `env:"DATABASE_SEARCH_PATH_VIA_OPTIONS" envDefault:"false"`
 
 	// PgxPool is the shared pgxpool.Pool for all pgvector stores. Populated by
 	// main after pool creation; NOT sourced from environment variables.
@@ -238,7 +340,6 @@ type Config struct {
 }
 
 func NewConfig() (*Config, error) {
-	// Attempt to load .env file (silently ignore if not present)
 	_ = godotenv.Load()
 
 	var config Config
@@ -256,6 +357,10 @@ func NewConfig() (*Config, error) {
 		return nil, err
 	}
 
+	if err := config.ValidateTenantID(); err != nil {
+		return nil, err
+	}
+
 	ensureInstallationID(&config)
 	ensureLicenseKey(&config)
 
@@ -263,12 +368,10 @@ func NewConfig() (*Config, error) {
 }
 
 func ensureInstallationID(config *Config) {
-	// validate current installation ID from environment
 	if config.InstallationID != "" && uuid.Validate(config.InstallationID) == nil {
 		return
 	}
 
-	// check local file for installation ID
 	installationIDPath := filepath.Join(config.DataDir, "installation_id")
 	installationID, err := os.ReadFile(installationIDPath)
 	if err != nil {
@@ -279,23 +382,111 @@ func ensureInstallationID(config *Config) {
 		config.InstallationID = uuid.New().String()
 	}
 
-	// write installation ID to local file
-	_ = os.WriteFile(installationIDPath, []byte(config.InstallationID), 0644)
+	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
+		logrus.WithError(err).Warn("failed to create the data directory; the installation id will change on every start")
+		return
+	}
+
+	if err := os.WriteFile(installationIDPath, []byte(config.InstallationID), 0644); err != nil {
+		logrus.WithError(err).Warn("failed to store the installation id; it will change on every start")
+	}
 }
 
 func ensureLicenseKey(config *Config) {
-	// validate current license key from environment
 	if config.LicenseKey == "" {
 		return
 	}
 
-	// check license key validity, if invalid, set to empty
 	info, err := sdk.IntrospectLicenseKey(config.LicenseKey)
 	if err != nil {
 		config.LicenseKey = ""
 	} else if !info.IsValid() {
 		config.LicenseKey = ""
 	}
+}
+
+// WorkerPortsBase returns the base port for the worker container
+func (c *Config) WorkerPortsBase() int {
+	if c == nil {
+		return 28000
+	}
+	return c.DockerPortsBase
+}
+
+// WorkerPublicIP returns the public IP for the worker container
+func (c *Config) WorkerPublicIP() string {
+	if c == nil || c.DockerPublicIP == "" {
+		return "0.0.0.0"
+	}
+	return c.DockerPublicIP
+}
+
+// WorkerDockerEnv returns the DOCKER_* environment entries to inject into a
+// worker container so that the Docker CLI inside it talks to the daemon the
+// operator designated. Each DOCKER_INSIDE_* value is passed through with the
+// _INSIDE segment removed; empty values are omitted entirely.
+//
+// Returns nil when DOCKER_INSIDE is disabled, so a sandbox that is not meant to
+// reach Docker at all receives no Docker configuration.
+func (c *Config) WorkerDockerEnv() []string {
+	if c == nil || !c.DockerInside {
+		return nil
+	}
+
+	var env []string
+	for _, kv := range []struct{ name, value string }{
+		{"DOCKER_HOST", c.DockerInsideHost},
+		{"DOCKER_TLS_VERIFY", c.DockerInsideTLSVerify},
+		{"DOCKER_CERT_PATH", c.DockerInsideCertPath},
+	} {
+		if kv.value != "" {
+			env = append(env, kv.name+"="+kv.value)
+		}
+	}
+
+	return env
+}
+
+// WorkerDockerCertPath returns the TLS certificate directory that must be made
+// visible inside a worker container, or "" when there is nothing to mount. The
+// path is identical on both sides so that the injected DOCKER_CERT_PATH resolves
+// unchanged within the sandbox.
+func (c *Config) WorkerDockerCertPath() string {
+	if c == nil || !c.DockerInside {
+		return ""
+	}
+	return c.DockerInsideCertPath
+}
+
+// WorkerDockerSocket decides which host socket, if any, is bind-mounted into a
+// worker container.
+//
+//   - An explicit DOCKER_SOCKET always wins and is mounted as before.
+//   - Otherwise, if DOCKER_INSIDE_HOST is set, nothing is mounted: the sandbox
+//     reaches Docker over that endpoint, and exposing the host socket as well
+//     would hand it control of the daemon running PentAGI itself.
+//   - Otherwise the caller falls back to autodetecting the host socket, which is
+//     the historical behaviour; this is signalled by returning autodetect=true.
+func (c *Config) WorkerDockerSocket() (socket string, autodetect bool) {
+	if c == nil {
+		return "", true
+	}
+	switch {
+	case c.DockerSocket != "":
+		return c.DockerSocket, false
+	case c.DockerInsideHost != "":
+		return "", false
+	default:
+		return "", true
+	}
+}
+
+// WorkerNetwork returns the network for the worker container
+func (c *Config) WorkerNetwork() string {
+	if c == nil {
+		return ""
+	}
+	return c.DockerNetwork
 }
 
 // GetSecretPatterns returns a list of patterns for all secrets in the config
@@ -311,6 +502,7 @@ func (c *Config) GetSecretPatterns() []patterns.Pattern {
 		{c.CookieSigningSalt, "Cookie Salt"},
 		{c.OpenAIKey, "OpenAI Key"},
 		{c.AnthropicAPIKey, "Anthropic Key"},
+		{c.AnthropicIdentityToken, "Anthropic Identity Token"},
 		{c.EmbeddingKey, "Embedding Key"},
 		{c.LLMServerKey, "LLM Server Key"},
 		{c.OllamaServerAPIKey, "Ollama Key"},
@@ -323,6 +515,9 @@ func (c *Config) GetSecretPatterns() []patterns.Pattern {
 		{c.GLMAPIKey, "GLM Key"},
 		{c.KimiAPIKey, "Kimi Key"},
 		{c.QwenAPIKey, "Qwen Key"},
+		{c.MiniMaxAPIKey, "MiniMax Key"},
+		{c.MistralAPIKey, "Mistral Key"},
+		{c.XAIAPIKey, "xAI Key"},
 		{c.GoogleAPIKey, "Google API Key"},
 		{c.GoogleCXKey, "Google CX Key"},
 		{c.OAuthGoogleClientID, "Google Client ID"},
@@ -331,6 +526,7 @@ func (c *Config) GetSecretPatterns() []patterns.Pattern {
 		{c.OAuthGithubClientSecret, "Github Client Secret"},
 		{c.TraversaalAPIKey, "Traversaal Key"},
 		{c.TavilyAPIKey, "Tavily Key"},
+		{c.FirecrawlAPIKey, "Firecrawl Key"},
 		{c.PerplexityAPIKey, "Perplexity Key"},
 		{c.ProxyURL, "Proxy URL"},
 		{c.LangfusePublicKey, "Langfuse Public Key"},
@@ -343,7 +539,6 @@ func (c *Config) GetSecretPatterns() []patterns.Pattern {
 			continue
 		}
 
-		// escape regex special characters
 		escaped := regexp.QuoteMeta(trimmed)
 		pattern := patterns.Pattern{
 			Name:  s.name,

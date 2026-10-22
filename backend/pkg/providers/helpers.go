@@ -44,17 +44,14 @@ type dummyMessage struct {
 	Message string `json:"message"`
 }
 
-// wrapToolCallIDTemplateError annotates an error returned by
-// Provider.GetToolCallIDTemplate so the user sees an actionable hint when a
-// known upstream limitation blocks provider initialization. Currently it
-// covers the Ollama "model does not support tools" case (issue #280): the
-// underlying error is returned by the Ollama API itself and surfaces five
-// wraps deep, which previously left the user with a cryptic "failed to
-// determine tool call ID template" message. This helper is shared by the
-// flow and assistant provider paths, so the wording stays context-neutral.
-//
-// The function preserves the original error chain via %w so downstream code
-// (logs, langfuse spans, errors.Is/As) keeps working.
+func toolCallIDTemplateOrDefault(template string) string {
+	if template != "" {
+		return template
+	}
+
+	return cast.ToolCallIDTemplate
+}
+
 func wrapToolCallIDTemplateError(err error) error {
 	if err == nil {
 		return nil
@@ -88,6 +85,11 @@ func markReflectorRetry(ctx context.Context) context.Context {
 
 type repeatingDetector struct {
 	funcCalls []llms.FunctionCall
+	// lastResponse is what the tool answered on the last call that reached it,
+	// kept so a repeat can hand that answer back instead of replacing it with a
+	// notice. The answer is usually the only thing that explains the repetition
+	// -- a tool that does not exist says so, and the model never saw it.
+	lastResponse string
 }
 
 func (rd *repeatingDetector) detect(toolCall llms.ToolCall) bool {
@@ -105,12 +107,32 @@ func (rd *repeatingDetector) detect(toolCall llms.ToolCall) bool {
 	lastToolCall := rd.funcCalls[len(rd.funcCalls)-1]
 	if lastToolCall.Name != funcCall.Name || lastToolCall.Arguments != funcCall.Arguments {
 		rd.funcCalls = []llms.FunctionCall{funcCall}
+		rd.lastResponse = ""
 		return false
 	}
 
 	rd.funcCalls = append(rd.funcCalls, funcCall)
 
 	return len(rd.funcCalls) >= RepeatingToolCallThreshold
+}
+
+// repeatingToolResponse is what a repeated tool call is answered with.
+//
+// It hands back the answer the tool actually gave, when there is one. Replacing
+// that answer with a notice costs the model the diagnosis: in the case that
+// produced this guard's only observed aborts, the suppressed answer was the
+// executor's own "not found in available tools list", so the model was told
+// seven times that it was repeating and never once what was wrong.
+func repeatingToolResponse(funcName string, repeats int, previous string) string {
+	if previous == "" {
+		return fmt.Sprintf("tool call '%s' is repeating, please try another tool", funcName)
+	}
+
+	return fmt.Sprintf(
+		"you have called '%s' with identical arguments %d times and it answered the same way each "+
+			"time. Here is that answer again:\n\n%s\n\nIt will not change. Alter the arguments, "+
+			"use a different tool, or answer from what you already have.",
+		funcName, repeats, previous[:min(len(previous), repeatEchoLimit)])
 }
 
 func (rd *repeatingDetector) clearCallArguments(toolCall *llms.FunctionCall) llms.FunctionCall {
@@ -128,7 +150,7 @@ func (rd *repeatingDetector) clearCallArguments(toolCall *llms.FunctionCall) llm
 
 	var buffer strings.Builder
 	for _, k := range keys {
-		buffer.WriteString(fmt.Sprintf("%s: %v\n", k, v[k]))
+		fmt.Fprintf(&buffer, "%s: %v\n", k, v[k])
 	}
 
 	return llms.FunctionCall{
@@ -462,7 +484,7 @@ func (fp *flowProvider) restoreChain(
 
 	var rawChain []llms.MessageContent
 	if err == nil && !isEmptyChain(msgChain.Chain) {
-		json.Unmarshal(msgChain.Chain, &rawChain)
+		_ = json.Unmarshal(msgChain.Chain, &rawChain)
 	}
 
 	metadata := langfuse.Metadata{
@@ -618,19 +640,19 @@ func (fp *flowProvider) processChain(
 ) error {
 	msgChain, err := fp.db.GetMsgChain(ctx, msgChainID)
 	if err != nil {
-		logger.WithError(err).Error("failed to get message chain")
+		obs.LogErrorOrCancel(logger, err, "failed to get message chain")
 		return fmt.Errorf("failed to get message chain %d: %w", msgChainID, err)
 	}
 
 	var chain []llms.MessageContent
 	if err := json.Unmarshal(msgChain.Chain, &chain); err != nil {
-		logger.WithError(err).Error("failed to unmarshal message chain")
+		obs.LogErrorOrCancel(logger, err, "failed to unmarshal message chain")
 		return fmt.Errorf("failed to unmarshal message chain %d: %w", msgChainID, err)
 	}
 
 	updatedChain, err := transform(chain)
 	if err != nil {
-		logger.WithError(err).Error("failed to transform chain")
+		obs.LogErrorOrCancel(logger, err, "failed to transform chain")
 		return fmt.Errorf("failed to transform chain: %w", err)
 	}
 
@@ -680,7 +702,7 @@ func (fp *flowProvider) processChain(
 
 	chainBlob, err := json.Marshal(updatedChain)
 	if err != nil {
-		logger.WithError(err).Error("failed to marshal updated chain")
+		obs.LogErrorOrCancel(logger, err, "failed to marshal updated chain")
 		return fmt.Errorf("failed to marshal updated chain %d: %w", msgChainID, err)
 	}
 
@@ -692,7 +714,7 @@ func (fp *flowProvider) processChain(
 		ID:              msgChainID,
 	})
 	if err != nil {
-		logger.WithError(err).Error("failed to update message chain")
+		obs.LogErrorOrCancel(logger, err, "failed to update message chain")
 		return fmt.Errorf("failed to update message chain %d: %w", msgChainID, err)
 	}
 
@@ -853,26 +875,26 @@ func (fp *flowProvider) getExecutionContextByFlow(ctx context.Context) (string, 
 func (fp *flowProvider) subtasksToMarkdown(subtasks []tools.SubtaskInfo) string {
 	var buffer strings.Builder
 	for sid, subtask := range subtasks {
-		buffer.WriteString(fmt.Sprintf("# Subtask %d\n\n", sid+1))
-		buffer.WriteString(fmt.Sprintf("## %s\n\n%s\n\n", subtask.Title, subtask.Description))
+		fmt.Fprintf(&buffer, "# Subtask %d\n\n", sid+1)
+		fmt.Fprintf(&buffer, "## %s\n\n%s\n\n", subtask.Title, subtask.Description)
 	}
 
 	return buffer.String()
 }
 
 func (fp *flowProvider) getContainerPortsDescription() string {
-	ports := docker.GetPrimaryContainerPorts(fp.flowID)
+	ports := docker.GetPrimaryContainerPorts(fp.cfg.WorkerPortsBase(), fp.flowID)
 	var buffer strings.Builder
 
 	buffer.WriteString("**OOB Attack Infrastructure:**\n\n")
 
 	// Host network mode: container has direct access to host network interfaces
-	if fp.dockerNetwork == "host" {
+	if fp.cfg.WorkerNetwork() == "host" {
 		buffer.WriteString("This container uses **host network mode** with direct access to host network interfaces.\n\n")
 		buffer.WriteString("**MANDATORY PORTS - YOU MUST USE ONLY THESE:**\n\n")
 
 		for _, port := range ports {
-			buffer.WriteString(fmt.Sprintf("- Port %d/tcp (REQUIRED)\n", port))
+			fmt.Fprintf(&buffer, "- Port %d/tcp (REQUIRED)\n", port)
 		}
 
 		buffer.WriteString("\n**Network Access:**\n")
@@ -883,14 +905,14 @@ func (fp *flowProvider) getContainerPortsDescription() string {
 		buffer.WriteString("- All host network interfaces are accessible for binding\n\n")
 
 		buffer.WriteString("**Usage for OOB Attacks:**\n")
-		if fp.publicIP == "0.0.0.0" {
+		if fp.cfg.WorkerPublicIP() == "0.0.0.0" {
 			buffer.WriteString("To determine the public IP for callbacks:\n")
 			buffer.WriteString("1. Discover your public IP: `curl -s https://api.ipify.org` or `curl -s ipinfo.io/ip`\n")
 			buffer.WriteString("2. Use discovered IP in exploit payloads for callbacks\n")
 			buffer.WriteString("3. Listen on allocated ports (shown above) to receive connections\n\n")
 			buffer.WriteString("**Important:** Check Task.Input - user may have specified the public IP to use.\n")
 		} else {
-			buffer.WriteString(fmt.Sprintf("Your external IP is: **%s**\n\n", fp.publicIP))
+			fmt.Fprintf(&buffer, "Your external IP is: **%s**\n\n", fp.cfg.WorkerPublicIP())
 			buffer.WriteString("Use this IP in exploit payloads requiring callbacks (DNS exfiltration, reverse shells, XXE OOB, SSRF verification, etc.)\n")
 			buffer.WriteString("Listen on the allocated ports above to receive incoming connections.\n")
 		}
@@ -899,25 +921,25 @@ func (fp *flowProvider) getContainerPortsDescription() string {
 		buffer.WriteString("**MANDATORY FORWARDED PORTS - YOU MUST USE ONLY THESE:**\n\n")
 
 		for _, port := range ports {
-			buffer.WriteString(fmt.Sprintf("- Port %d/tcp (container) → %s:%d (external)\n", port, fp.publicIP, port))
+			fmt.Fprintf(&buffer, "- Port %d/tcp (container) → %s:%d (external)\n", port, fp.cfg.WorkerPublicIP(), port)
 		}
 
 		buffer.WriteString("\n**Port Usage Rules:**\n")
 		buffer.WriteString("- **YOU MUST use ONLY the ports listed above** for all listeners and reverse connections\n")
 		buffer.WriteString("- **CRITICAL**: Any reverse connections (shells, callbacks) will FAIL on other ports - only allocated ports are forwarded\n")
 		buffer.WriteString("- Standard ports like 4444, 8080, 9001 are NOT forwarded and will NOT work\n")
-		buffer.WriteString(fmt.Sprintf("- Example: For Metasploit reverse shell, use LPORT=%d (not 4444)\n\n", ports[0]))
+		fmt.Fprintf(&buffer, "- Example: For Metasploit reverse shell, use LPORT=%d (not 4444)\n\n", ports[0])
 
 		buffer.WriteString("**Usage for OOB Attacks:**\n")
 
-		if fp.publicIP == "0.0.0.0" {
+		if fp.cfg.WorkerPublicIP() == "0.0.0.0" {
 			buffer.WriteString("The bind IP is 0.0.0.0 (all interfaces). To receive external callbacks:\n")
 			buffer.WriteString("1. Discover your public IP: `curl -s https://api.ipify.org` or `curl -s ipinfo.io/ip`\n")
 			buffer.WriteString("2. Use discovered IP in exploit payloads for callbacks\n")
 			buffer.WriteString("3. Listen on container ports (shown above) to receive connections\n\n")
 			buffer.WriteString("**Important:** Check Task.Input - user may have specified the public IP to use.\n")
 		} else {
-			buffer.WriteString(fmt.Sprintf("Your external IP is: %s\n", fp.publicIP))
+			fmt.Fprintf(&buffer, "Your external IP is: %s\n", fp.cfg.WorkerPublicIP())
 			buffer.WriteString("Use this IP in exploit payloads requiring callbacks (DNS exfiltration, reverse shells, XXE OOB, SSRF verification, etc.)\n")
 			buffer.WriteString("Listen on the container ports above to receive incoming connections.\n")
 		}
@@ -1017,7 +1039,7 @@ func formatToolCallArguments(args string) string {
 		if err != nil {
 			continue
 		}
-		buffer.WriteString(fmt.Sprintf("<field name=\"%s\">%s</field>\n", k, cutString(string(value), 256)))
+		fmt.Fprintf(&buffer, "<field name=\"%s\">%s</field>\n", k, cutString(string(value), 256))
 	}
 
 	return buffer.String()
@@ -1155,9 +1177,8 @@ func appendNewToolCallsToHistory(history string, toolCalls []map[string]string) 
 	}
 
 	for _, toolCall := range toolCalls {
-		buffer.WriteString(fmt.Sprintf(
-			"<tool_call>\n<name>%s</name>\n<arguments>\n%s\n</arguments>\n<result>%s</result>\n</tool_call>\n",
-			toolCall["name"], toolCall["args"], toolCall["result"]))
+		fmt.Fprintf(&buffer, "<tool_call>\n<name>%s</name>\n<arguments>\n%s\n</arguments>\n<result>%s</result>\n</tool_call>\n",
+			toolCall["name"], toolCall["args"], toolCall["result"])
 	}
 
 	return buffer.String()

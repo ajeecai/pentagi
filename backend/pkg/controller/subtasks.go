@@ -8,12 +8,11 @@ import (
 	"sync"
 
 	"pentagi/pkg/database"
-)
+	"pentagi/pkg/providers"
+	"pentagi/pkg/tools"
 
-type NewSubtaskInfo struct {
-	Title       string
-	Description string
-}
+	"github.com/sirupsen/logrus"
+)
 
 type SubtaskController interface {
 	LoadSubtasks(ctx context.Context, taskID int64, updater TaskUpdater) error
@@ -22,6 +21,7 @@ type SubtaskController interface {
 	PopSubtask(ctx context.Context, updater TaskUpdater) (SubtaskWorker, error)
 	ListSubtasks(ctx context.Context) []SubtaskWorker
 	GetSubtask(ctx context.Context, subtaskID int64) (SubtaskWorker, error)
+	InvalidateSubtasks(subtaskIDs []int64)
 }
 
 type subtaskController struct {
@@ -74,7 +74,17 @@ func (stc *subtaskController) GenerateSubtasks(ctx context.Context) error {
 	}
 
 	if len(plan) == 0 {
-		return fmt.Errorf("no subtasks generated for task %d", stc.taskCtx.TaskID)
+		if plan == nil {
+			return fmt.Errorf("no subtasks generated for task %d", stc.taskCtx.TaskID)
+		}
+
+		// An explicit empty generator plan means this task needs no decomposition.
+		// Execute the original request as one subtask. A nil plan is not the same
+		// thing: it also represents a missing result from a malformed tool call.
+		plan = []tools.SubtaskInfo{{
+			Title:       stc.taskCtx.TaskTitle,
+			Description: stc.taskCtx.TaskInput,
+		}}
 	}
 
 	// TODO: change it to insert subtasks in transaction
@@ -101,6 +111,18 @@ func (stc *subtaskController) RefineSubtasks(ctx context.Context) error {
 
 	plan, err := stc.taskCtx.Provider.RefineSubtasks(ctx, stc.taskCtx.TaskID)
 	if err != nil {
+		// Refinement is advisory while a previously planned subtask remains.
+		// A model refusal must not strand the task, but a database failure,
+		// cancellation, or a missing remaining plan still needs its normal error.
+		if ctx.Err() == nil && !errors.Is(err, context.Canceled) && errors.Is(err, providers.ErrAgentModelCall) {
+			for _, subtask := range subtasks {
+				if subtask.Status == database.SubtaskStatusCreated {
+					logrus.WithContext(ctx).WithError(err).WithField("task_id", stc.taskCtx.TaskID).
+						Warn("subtask refiner failed; continuing the existing plan")
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("failed to refine subtasks for task %d: %w", stc.taskCtx.TaskID, err)
 	}
 
@@ -119,6 +141,7 @@ func (stc *subtaskController) RefineSubtasks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to delete subtasks for task %d: %w", stc.taskCtx.TaskID, err)
 	}
+	stc.InvalidateSubtasks(subtaskIDs)
 
 	// TODO: change it to insert subtasks in transaction and union it with delete ones
 	for _, info := range plan {
@@ -190,4 +213,19 @@ func (stc *subtaskController) GetSubtask(ctx context.Context, subtaskID int64) (
 	}
 
 	return subtask, nil
+}
+
+// InvalidateSubtasks drops workers deleted outside this controller,
+// preventing stale cache lookups.
+func (stc *subtaskController) InvalidateSubtasks(subtaskIDs []int64) {
+	if len(subtaskIDs) == 0 {
+		return
+	}
+
+	stc.mx.Lock()
+	defer stc.mx.Unlock()
+
+	for _, id := range subtaskIDs {
+		delete(stc.subtasks, id)
+	}
 }

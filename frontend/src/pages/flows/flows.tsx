@@ -1,18 +1,25 @@
 import type { ColumnDef } from '@tanstack/react-table';
 
-import { Ellipsis, Eye, GitFork, Loader2, Pause, Pencil, PencilLine, Plus, Star, Trash } from 'lucide-react';
+import { useMutation } from '@apollo/client/react';
+import { Ellipsis, Eye, GitFork, Pause, Pencil, PencilLine, Plus, Star, Trash } from 'lucide-react';
 import { CheckCircle2, XCircle } from 'lucide-react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { FlowStatusIcon } from '@/components/icons/flow-status-icon';
-import { ProviderIcon } from '@/components/icons/provider-icon';
+import {
+    AppHeader,
+    AppHeaderAction,
+    AppHeaderActions,
+    AppHeaderContent,
+    AppHeaderTitle,
+} from '@/components/layouts/app/app-header';
 import ConfirmationDialog from '@/components/shared/confirmation-dialog';
-import { HeaderButton } from '@/components/shared/header-button';
+import { ErrorState } from '@/components/shared/error-state';
 import { InlineEditInput } from '@/components/shared/inline-edit';
+import { LoadingState } from '@/components/shared/loading-state';
 import { Badge } from '@/components/ui/badge';
-import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from '@/components/ui/breadcrumb';
 import { Button } from '@/components/ui/button';
 import { ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
 import { DataTable, DataTableColumnHeader } from '@/components/ui/data-table';
@@ -23,17 +30,20 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
-import { StatusCard } from '@/components/ui/status-card';
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
+import { Spinner } from '@/components/ui/spinner';
 import { Toggle } from '@/components/ui/toggle';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { ResultType, StatusType, type TerminalFragmentFragment, useRenameFlowMutation } from '@/graphql/types';
+import { FlowProviderLabel } from '@/features/flows/flow-provider-label';
+import { RenameFlowDocument, ResultType, StatusType, type TerminalFragmentFragment } from '@/graphql/types';
+import { useIsOwnFlow } from '@/hooks/use-is-own-flow';
 import { useTableState } from '@/hooks/use-table-state';
+import { routes } from '@/lib/routes';
 import { mergeHrefWithSearchParams } from '@/lib/url-params';
-import { formatDate } from '@/lib/utils/format';
+import { formatTableDate } from '@/lib/utils/format';
 import { useFavorites } from '@/providers/favorites-provider';
 import { type Flow, useFlows } from '@/providers/flows-provider';
+import { useProviders } from '@/providers/providers-provider';
 
 const statusConfig: Record<
     StatusType,
@@ -45,7 +55,7 @@ const statusConfig: Record<
     },
     [StatusType.Failed]: {
         label: 'Failed',
-        variant: 'destructive',
+        variant: 'outline',
     },
     [StatusType.Finished]: {
         label: 'Finished',
@@ -53,7 +63,7 @@ const statusConfig: Record<
     },
     [StatusType.Running]: {
         label: 'Running',
-        variant: 'default',
+        variant: 'outline',
     },
     [StatusType.Waiting]: {
         label: 'Waiting',
@@ -64,21 +74,23 @@ const statusConfig: Record<
 function Flows() {
     const navigate = useNavigate();
     const location = useLocation();
-    const { deleteFlow, finishFlow, flows, isLoading } = useFlows();
-    const { isFavoriteFlow, toggleFavoriteFlow } = useFavorites();
+    const { deleteFlow, finishFlow, flows, flowsError, isLoading, refetch } = useFlows();
+    const { canToggleFavorite, isFavoriteFlow, toggleFavoriteFlow } = useFavorites();
+    const { providers } = useProviders();
+    const isOwnFlow = useIsOwnFlow();
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [deletingFlow, setDeletingFlow] = useState<Flow | null>(null);
     const [finishingFlowIds, setFinishingFlowIds] = useState<Set<string>>(new Set());
     const [deletingFlowIds, setDeletingFlowIds] = useState<Set<string>>(new Set());
     const [editingFlowId, setEditingFlowId] = useState<null | string>(null);
     const editingInputRef = useRef<HTMLInputElement>(null);
-    const [renameFlowMutation, { loading: isRenameLoading }] = useRenameFlowMutation();
+    const [renameFlowMutation, { loading: isRenameLoading }] = useMutation(RenameFlowDocument);
 
     const { filter, pageIndex: currentPage, setFilter, setPage: handlePageChange } = useTableState();
 
     const handleFlowOpen = useCallback(
         (flowId: string) => {
-            navigate(mergeHrefWithSearchParams(`/flows/${flowId}`, new URLSearchParams(location.search)));
+            navigate(mergeHrefWithSearchParams(routes.flow(flowId), new URLSearchParams(location.search)));
         },
         [navigate, location.search],
     );
@@ -166,7 +178,7 @@ function Flows() {
         () => [
             {
                 accessorKey: 'id',
-                cell: ({ row }) => <div className="font-mono text-sm">{row.getValue('id')}</div>,
+                cell: ({ row }) => <div className="font-mono text-sm whitespace-nowrap">{row.getValue('id')}</div>,
                 enableHiding: false,
                 header: ({ column }) => (
                     <DataTableColumnHeader
@@ -174,10 +186,10 @@ function Flows() {
                         title="ID"
                     />
                 ),
-                maxSize: 80,
+                maxSize: 110,
                 meta: { searchable: true },
-                minSize: 60,
-                size: 70,
+                minSize: 80,
+                size: 90,
             },
             {
                 accessorKey: 'title',
@@ -213,7 +225,7 @@ function Flows() {
                 ),
                 meta: { searchable: true },
                 minSize: 200,
-                size: 300,
+                size: 240,
             },
             {
                 accessorKey: 'status',
@@ -249,19 +261,13 @@ function Flows() {
                 // directly through `row.original`, so the icon + label stay
                 // intact.
                 accessorFn: (row) => row.provider?.name ?? '',
-                cell: ({ row }) => {
-                    const flow = row.original;
-
-                    return (
-                        <div className="flex items-center gap-2">
-                            <ProviderIcon
-                                className="size-4"
-                                provider={flow.provider}
-                            />
-                            <span className="text-sm">{flow.provider?.name || 'N/A'}</span>
-                        </div>
-                    );
-                },
+                cell: ({ row }) => (
+                    <FlowProviderLabel
+                        isOwnFlow={isOwnFlow(row.original)}
+                        provider={row.original.provider}
+                        providers={providers}
+                    />
+                ),
                 header: ({ column }) => (
                     <DataTableColumnHeader
                         column={column}
@@ -269,10 +275,10 @@ function Flows() {
                     />
                 ),
                 id: 'provider',
-                maxSize: 150,
+                maxSize: 240,
                 meta: { searchable: true },
-                minSize: 80,
-                size: 100,
+                minSize: 100,
+                size: 160,
                 sortingFn: (rowA, rowB) => {
                     const nameA = rowA.original.provider?.name || '';
                     const nameB = rowB.original.provider?.name || '';
@@ -336,8 +342,8 @@ function Flows() {
                 id: 'terminals',
                 maxSize: 220,
                 meta: { searchable: true },
-                minSize: 160,
-                size: 180,
+                minSize: 140,
+                size: 160,
                 sortingFn: (rowA, rowB) => {
                     const terminalsA = rowA.original.terminals || [];
                     const terminalsB = rowB.original.terminals || [];
@@ -350,7 +356,7 @@ function Flows() {
                 cell: ({ row }) => {
                     const dateString = row.getValue('createdAt') as string;
 
-                    return <div className="text-sm">{formatDate(new Date(dateString))}</div>;
+                    return <div className="text-sm whitespace-nowrap">{formatTableDate(new Date(dateString))}</div>;
                 },
                 header: ({ column }) => (
                     <DataTableColumnHeader
@@ -358,10 +364,10 @@ function Flows() {
                         title="Created"
                     />
                 ),
-                maxSize: 140,
+                maxSize: 170,
                 meta: { columnMenuLabel: 'Created' },
-                minSize: 100,
-                size: 120,
+                minSize: 128,
+                size: 136,
                 sortingFn: (rowA, rowB) => {
                     const dateA = new Date(rowA.getValue('createdAt') as string);
                     const dateB = new Date(rowB.getValue('createdAt') as string);
@@ -374,7 +380,7 @@ function Flows() {
                 cell: ({ row }) => {
                     const dateString = row.getValue('updatedAt') as string;
 
-                    return <div className="text-sm">{formatDate(new Date(dateString))}</div>;
+                    return <div className="text-sm whitespace-nowrap">{formatTableDate(new Date(dateString))}</div>;
                 },
                 header: ({ column }) => (
                     <DataTableColumnHeader
@@ -382,10 +388,10 @@ function Flows() {
                         title="Updated"
                     />
                 ),
-                maxSize: 140,
+                maxSize: 170,
                 meta: { columnMenuLabel: 'Updated' },
-                minSize: 100,
-                size: 120,
+                minSize: 128,
+                size: 136,
                 sortingFn: (rowA, rowB) => {
                     const dateA = new Date(rowA.getValue('updatedAt') as string);
                     const dateB = new Date(rowB.getValue('updatedAt') as string);
@@ -400,19 +406,21 @@ function Flows() {
 
                     return (
                         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                            <Toggle
-                                aria-label="Toggle favorite"
-                                className="border-none data-[state=on]:bg-transparent data-[state=on]:*:[svg]:fill-yellow-500 data-[state=on]:*:[svg]:stroke-yellow-500"
-                                onClick={async (event) => {
-                                    event.stopPropagation();
-                                    await toggleFavoriteFlow(flow.id);
-                                }}
-                                pressed={isFavoriteFlow(flow.id)}
-                                size="sm"
-                                variant="outline"
-                            >
-                                <Star className="size-4" />
-                            </Toggle>
+                            {canToggleFavorite(flow) && (
+                                <Toggle
+                                    aria-label="Toggle favorite"
+                                    className="border-none data-[state=on]:bg-transparent data-[state=on]:*:[svg]:fill-yellow-500 data-[state=on]:*:[svg]:stroke-yellow-500"
+                                    onClick={async (event) => {
+                                        event.stopPropagation();
+                                        await toggleFavoriteFlow(flow.id);
+                                    }}
+                                    pressed={isFavoriteFlow(flow.id)}
+                                    size="sm"
+                                    variant="outline"
+                                >
+                                    <Star />
+                                </Toggle>
+                            )}
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                     <Button
@@ -444,7 +452,7 @@ function Flows() {
                                         >
                                             {finishingFlowIds.has(flow.id) ? (
                                                 <>
-                                                    <Loader2 className="animate-spin" />
+                                                    <Spinner variant="circle" />
                                                     Finishing...
                                                 </>
                                             ) : (
@@ -462,12 +470,12 @@ function Flows() {
                                     >
                                         {deletingFlowIds.has(flow.id) ? (
                                             <>
-                                                <Loader2 className="size-4 animate-spin" />
+                                                <Spinner variant="circle" />
                                                 Deleting...
                                             </>
                                         ) : (
                                             <>
-                                                <Trash className="size-4" />
+                                                <Trash />
                                                 Delete
                                             </>
                                         )}
@@ -487,7 +495,10 @@ function Flows() {
             },
         ],
         [
+            canToggleFavorite,
             deletingFlowIds,
+            isOwnFlow,
+            providers,
             editingFlowId,
             finishingFlowIds,
             handleFlowDeleteDialogOpen,
@@ -508,11 +519,15 @@ function Flows() {
 
             return (
                 <>
-                    <ContextMenuItem onClick={async () => toggleFavoriteFlow(flow.id)}>
-                        <Star />
-                        {isFavoriteFlow(flow.id) ? 'Remove from favorites' : 'Add to favorites'}
-                    </ContextMenuItem>
-                    <ContextMenuSeparator />
+                    {canToggleFavorite(flow) && (
+                        <>
+                            <ContextMenuItem onClick={async () => toggleFavoriteFlow(flow.id)}>
+                                <Star />
+                                {isFavoriteFlow(flow.id) ? 'Remove from favorites' : 'Add to favorites'}
+                            </ContextMenuItem>
+                            <ContextMenuSeparator />
+                        </>
+                    )}
                     <ContextMenuItem onClick={() => handleFlowOpen(flow.id)}>
                         <Eye />
                         View
@@ -543,6 +558,7 @@ function Flows() {
             );
         },
         [
+            canToggleFavorite,
             deletingFlowIds,
             finishingFlowIds,
             handleFlowDeleteDialogOpen,
@@ -564,42 +580,45 @@ function Flows() {
     );
 
     const pageHeader = (
-        <header className="bg-background sticky top-0 z-10 flex h-12 w-full shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12">
-            <div className="flex min-w-0 flex-1 items-center gap-2 px-4">
-                <SidebarTrigger className="-ml-1 shrink-0" />
-                <Separator
-                    className="h-4 shrink-0"
-                    orientation="vertical"
-                />
-                <Breadcrumb className="min-w-0 flex-1">
-                    <BreadcrumbList className="min-w-0 flex-nowrap">
-                        <BreadcrumbItem className="min-w-0">
-                            <GitFork className="size-4 shrink-0" />
-                            <BreadcrumbPage className="min-w-0 truncate">Flows</BreadcrumbPage>
-                        </BreadcrumbItem>
-                    </BreadcrumbList>
-                </Breadcrumb>
-            </div>
-            <div className="flex shrink-0 items-center gap-2 px-4">
-                <HeaderButton
+        <AppHeader>
+            <AppHeaderContent>
+                <AppHeaderTitle icon={<GitFork className="size-4 shrink-0" />}>Flows</AppHeaderTitle>
+            </AppHeaderContent>
+            <AppHeaderActions>
+                <AppHeaderAction
                     icon={<Plus />}
                     label="New Flow"
-                    onClick={() => navigate('/flows/new')}
+                    onClick={() => navigate(routes.newFlow)}
                     variant="secondary"
                 />
-            </div>
-        </header>
+            </AppHeaderActions>
+        </AppHeader>
     );
 
     if (isLoading) {
         return (
             <>
                 {pageHeader}
-                <div className="flex flex-col gap-4 p-4">
-                    <StatusCard
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <LoadingState
                         description="Please wait while we fetch your conversation flows"
-                        icon={<Loader2 className="text-muted-foreground size-16 animate-spin" />}
                         title="Loading flows..."
+                    />
+                </div>
+            </>
+        );
+    }
+
+    // Error surface only when there's no data — a failed background refetch must not blank a working list.
+    if (flowsError && flows.length === 0) {
+        return (
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <ErrorState
+                        message={flowsError.message}
+                        onRetry={refetch}
+                        title="Error loading flows"
                     />
                 </div>
             </>
@@ -610,21 +629,25 @@ function Flows() {
         return (
             <>
                 {pageHeader}
-                <div className="flex flex-col gap-4 p-4">
-                    <StatusCard
-                        action={
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <Empty>
+                        <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                                <GitFork />
+                            </EmptyMedia>
+                            <EmptyTitle>No flows found</EmptyTitle>
+                            <EmptyDescription>Get started by creating your first conversation flow</EmptyDescription>
+                        </EmptyHeader>
+                        <EmptyContent>
                             <Button
-                                onClick={() => navigate('/flows/new')}
+                                onClick={() => navigate(routes.newFlow)}
                                 variant="secondary"
                             >
                                 <Plus />
                                 New Flow
                             </Button>
-                        }
-                        description="Get started by creating your first conversation flow"
-                        icon={<GitFork className="text-muted-foreground size-8" />}
-                        title="No flows found"
-                    />
+                        </EmptyContent>
+                    </Empty>
                 </div>
             </>
         );
@@ -640,6 +663,8 @@ function Flows() {
                     empty={{ entityName: 'flows' }}
                     filterPlaceholder="Filter flows..."
                     filterValue={filter}
+                    isVirtualized
+                    label="Flows"
                     onFilterChange={setFilter}
                     onPageChange={handlePageChange}
                     onRowClick={handleRowClick}

@@ -10,8 +10,21 @@ This document serves as a comprehensive guide to the configuration system in Pen
     - [Current Web Settings Coverage](#current-web-settings-coverage)
     - [Still Server-Managed](#still-server-managed)
   - [General Settings](#general-settings)
+    - [Multi-Instance Deployment (`TENANT_ID`)](#multi-instance-deployment-tenant_id)
+      - [What the application namespaces automatically](#what-the-application-namespaces-automatically)
+      - [What stays the operator's responsibility](#what-stays-the-operators-responsibility)
+      - [Deployment topologies](#deployment-topologies)
+      - [Extensions installed outside `public` (`DATABASE_EXTENSIONS_SCHEMA`)](#extensions-installed-outside-public-database_extensions_schema)
+      - [Multi-tenant PostgreSQL access through PgBouncer](#multi-tenant-postgresql-access-through-pgbouncer)
+      - [Multi-tenant PostgreSQL through Supabase's Supavisor pooler (`DATABASE_SEARCH_PATH_VIA_OPTIONS`)](#multi-tenant-postgresql-through-supabases-supavisor-pooler-database_search_path_via_options)
+    - [PentAGI Cloud API Settings](#pentagi-cloud-api-settings)
+      - [`UPDATE_STRATEGY`](#update_strategy)
+      - [`UPDATE_CHECK_INTERVAL`](#update_check_interval)
+      - [`UPDATE_SERVER_HOST`](#update_server_host)
+      - [`SUPPORT_SERVER_HOST`](#support_server_host)
     - [Usage Details](#usage-details)
   - [Docker Settings](#docker-settings)
+    - [Worker Docker Access (`DOCKER_INSIDE_*`)](#worker-docker-access-docker_inside_)
     - [Usage Details](#usage-details-1)
   - [Server Settings](#server-settings)
     - [Usage Details](#usage-details-2)
@@ -24,6 +37,7 @@ This document serves as a comprehensive guide to the configuration system in Pen
   - [LLM Provider Settings](#llm-provider-settings)
     - [OpenAI](#openai)
     - [Anthropic](#anthropic)
+      - [Workload Identity Federation](#workload-identity-federation)
     - [Ollama LLM Provider](#ollama-llm-provider)
     - [Google AI (Gemini) LLM Provider](#google-ai-gemini-llm-provider)
     - [AWS Bedrock LLM Provider](#aws-bedrock-llm-provider)
@@ -31,6 +45,9 @@ This document serves as a comprehensive guide to the configuration system in Pen
     - [GLM LLM Provider](#glm-llm-provider)
     - [Kimi LLM Provider](#kimi-llm-provider)
     - [Qwen LLM Provider](#qwen-llm-provider)
+    - [MiniMax LLM Provider](#minimax-llm-provider)
+    - [Mistral LLM Provider](#mistral-llm-provider)
+    - [xAI (Grok) LLM Provider](#xai-grok-llm-provider)
     - [Custom LLM Provider](#custom-llm-provider)
     - [Usage Details](#usage-details-6)
   - [Embedding Settings](#embedding-settings)
@@ -58,21 +75,26 @@ This document serves as a comprehensive guide to the configuration system in Pen
     - [Google Search](#google-search)
     - [Traversaal Search](#traversaal-search)
     - [Tavily Search](#tavily-search)
+    - [Firecrawl Search](#firecrawl-search)
     - [Perplexity Search](#perplexity-search)
     - [Searxng Search](#searxng-search)
+    - [Internal Analytics Engine](#internal-analytics-engine)
     - [Usage Details](#usage-details-10)
   - [Network and Proxy Settings](#network-and-proxy-settings)
     - [Usage Details](#usage-details-11)
   - [Graphiti Knowledge Graph Settings](#graphiti-knowledge-graph-settings)
-    - [Usage Details](#usage-details-12)
+    - [PentAGI Configuration Boundary](#pentagi-configuration-boundary)
+    - [Client Lifecycle and Failure Behavior](#client-lifecycle-and-failure-behavior)
+    - [Data Flow, Search, and Tenancy](#data-flow-search-and-tenancy)
+    - [Deployment Ownership](#deployment-ownership)
   - [Agent Supervision Settings](#agent-supervision-settings)
-    - [Usage Details](#usage-details-13)
+    - [Usage Details](#usage-details-12)
     - [Supervision System Integration](#supervision-system-integration)
     - [Recommended Settings](#recommended-settings)
   - [Observability Settings](#observability-settings)
     - [Telemetry](#telemetry)
     - [Langfuse](#langfuse)
-    - [Usage Details](#usage-details-14)
+    - [Usage Details](#usage-details-13)
 
 ## Configuration Basics
 
@@ -118,10 +140,9 @@ These web-console features do not replace the environment variables in this guid
 
 The environment variables documented below remain the source of truth for configuration that is not currently editable from the web console:
 
-- **LLM credentials and connection settings**: API keys, base URLs, auth modes, and provider-specific connection settings for OpenAI, Anthropic, Bedrock, Ollama, custom providers, and similar backends; config-path settings apply only where supported, such as `OLLAMA_SERVER_CONFIG_PATH` and `LLM_SERVER_CONFIG_PATH`.
-- **Search provider credentials and options**: DuckDuckGo, Google, Tavily, Traversaal, Perplexity, Searxng, Sploitus, and related search configuration.
+- **LLM credentials and connection settings**: API keys, base URLs, auth modes, and provider-specific connection settings for OpenAI, Anthropic, Bedrock, Ollama, custom providers, and similar backends; config-path settings apply only where supported, such as `OLLAMA_SERVER_CONFIG_PATH`, `LLM_SERVER_CONFIG_PATH`, and `BEDROCK_CONFIG_PATH`.
+- **Search provider credentials and options**: DuckDuckGo, Google, Tavily, Traversaal, Perplexity, SearXNG, Sploitus, and related search configuration.
 - **Third-party integrations**: Langfuse, Graphiti, and other external observability or knowledge services.
-- **MCP server management**: MCP settings are not currently exposed as a live web-console feature.
 
 ## General Settings
 
@@ -130,14 +151,183 @@ These settings control basic application behavior and are foundational for the s
 | Option           | Environment Variable        | Default Value                                                                | Description                                                              |
 | ---------------- | --------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | DatabaseURL      | `DATABASE_URL`              | `postgres://pentagiuser:pentagipass@pgvector:5432/pentagidb?sslmode=disable` | Connection string for the PostgreSQL database with pgvector extension    |
+| DatabaseExtensionsSchema | `DATABASE_EXTENSIONS_SCHEMA` | `public`                                                              | Schema every tenant's search_path must include for shared extensions (`vector`, `pg_trgm`) to resolve. Only used when `TenantID` is set. Override for databases that install extensions elsewhere by convention, e.g. Supabase uses `extensions`. See [Extensions installed outside `public`](#extensions-installed-outside-public-database_extensions_schema). |
+| DatabaseSearchPathViaOptions | `DATABASE_SEARCH_PATH_VIA_OPTIONS` | `false`                                                          | Sends the tenant search_path as `options=--search_path=<value>` instead of a bare `search_path` parameter. Only used when `TenantID` is set. For poolers that forward `options` but drop an unrecognized bare `search_path` (e.g. some Supabase Supavisor versions). See [Multi-tenant PostgreSQL through Supabase's Supavisor pooler](#multi-tenant-postgresql-through-supabases-supavisor-pooler-database_search_path_via_options). |
 | DBMaxOpenConns   | `DATABASE_MAX_OPEN_CONNS`   | `25`                                                                         | Maximum open connections in the shared `sql.DB` pool (sqlc + GORM combined). See [database.md §Connection Pooling](database.md#connection-pooling). |
 | DBMaxIdleConns   | `DATABASE_MAX_IDLE_CONNS`   | `5`                                                                          | Maximum idle connections kept open between requests                      |
 | DBVectorMaxConns | `DATABASE_VECTOR_MAX_CONNS` | `10`                                                                         | Maximum connections in the shared `pgxpool` for all pgvector stores      |
 | Debug            | `DEBUG`                     | `false`                                                                      | Enables debug mode with additional logging                               |
 | DataDir          | `DATA_DIR`                  | `./data`                                                                     | Directory for storing persistent data                                    |
 | AskUser          | `ASK_USER`                  | `false`                                                                      | When enabled, requires explicit user confirmation for certain operations |
+| TenantID         | `TENANT_ID`                 | *(empty)*                                                                    | Namespaces every externally-visible artifact this instance creates so several PentAGI instances can share one host and one set of backing services. Empty = single-instance behavior, unchanged. See [Multi-Instance Deployment](#multi-instance-deployment-tenant_id). |
+| DockerPortsBase  | `DOCKER_PORTS_BASE`         | `0` (means `28000`)                                                          | First host port for per-flow sandbox port publishing; each instance owns `[base, base+2000)` |
 | InstallationID   | `INSTALLATION_ID`           | *(none)*                                                                     | Unique installation identifier for PentAGI Cloud API communication       |
 | LicenseKey       | `LICENSE_KEY`               | *(none)*                                                                     | License key for PentAGI Cloud API authentication and feature activation  |
+| UpdateStrategy   | `UPDATE_STRATEGY`         | `preview`                                                                    | Which builds this installation is offered: `nightly`, `preview` or `stable`. An unrecognised value falls back to `preview`. See [PentAGI Cloud API Settings](#pentagi-cloud-api-settings). |
+| UpdateCheckInterval | `UPDATE_CHECK_INTERVAL` | `3h`                                                                         | How often the running server reports its own state to the Cloud API. `0` disables the report. See [PentAGI Cloud API Settings](#pentagi-cloud-api-settings). |
+| UpdateServerHost | `UPDATE_SERVER_HOST`      | `update.pentagi.com`                                                         | PentAGI Cloud API endpoint as `host[:port]`, **without a scheme** — the connection is always HTTPS. See [PentAGI Cloud API Settings](#pentagi-cloud-api-settings). |
+| SupportServerHost | `SUPPORT_SERVER_HOST`    | `support.pentagi.com`                                                        | PentAGI Support API endpoint as `host[:port]`, same shape as `UPDATE_SERVER_HOST`. See [PentAGI Cloud API Settings](#pentagi-cloud-api-settings). |
+
+### Multi-Instance Deployment (`TENANT_ID`)
+
+`TENANT_ID` namespaces the artifacts a PentAGI instance creates in **shared external services**, so that several independent installations can use one PostgreSQL server, one worker node (Docker daemon), one Neo4j/Graphiti and one Langfuse without colliding.
+
+**Primary use case: several management instances, shared resources.** The typical deployment puts each PentAGI management backend on its own server, while the heavy shared resources — the worker node where sandbox containers run, and the database — are common. `TENANT_ID` is what keeps those instances from writing over each other.
+
+Running several management instances on **one** server is also possible (for example behind an nginx reverse proxy), but that is not what the installer or the stock `docker-compose.yml` are built for — see *Deployment topologies* below.
+
+**When empty (the default) nothing changes.** Every helper degrades to an identity function: container names stay `pentagi-terminal-<id>`, the database schema stays `public`, Graphiti group ids stay `flow-<id>`, and the session cookie stays `auth`. This is enforced in one place (`backend/pkg/config/tenant.go`) and covered by tests.
+
+**Validation.** `TENANT_ID` must match `^[a-z][a-z0-9_]{0,31}$` — the intersection of the constraints imposed by every consumer:
+
+| Consumer | Constraint |
+| --- | --- |
+| Docker object name | `[a-zA-Z0-9][a-zA-Z0-9_.-]*` |
+| PostgreSQL identifier | ≤ 63 bytes; unquoted-safe as `[a-z_][a-z0-9_]*` |
+| Graphiti / Neo4j group id | parsed on a hyphen boundary, so no hyphens |
+
+Hyphens are excluded deliberately: they separate the tenant from the rest of a group id or object name. An invalid value **aborts startup** rather than being normalised, because collapsing two distinct tenants onto one namespace is exactly the collision tenancy exists to prevent.
+
+#### What the application namespaces automatically
+
+| Area | Effect |
+| --- | --- |
+| PostgreSQL | A schema named after the tenant is created on boot and `search_path` is set to `<tenant>,<DATABASE_EXTENSIONS_SCHEMA>`; the DSN is rewritten once so sqlc, GORM, goose and the pgvector pool all follow. Extensions (`vector`, `pg_trgm`) stay shared in `DATABASE_EXTENSIONS_SCHEMA` (default `public`). |
+| Worker containers | Sandbox container names become `<tenant>-pentagi-terminal-<flow>`; the per-flow volume and the container hostname derive from that name automatically. Both are labelled `pentagi.tenant`, so daemon-wide sweeps can filter by owner. |
+| Host ports | Per-flow sandbox ports are allocated from `DOCKER_PORTS_BASE` (default `28000`), giving each instance the window `[base, base+2000)`. |
+| Knowledge graph | Graphiti/Neo4j group ids become `<tenant>-flow-<id>`. The GraphQL API contract is unchanged — clients still send `flow-<id>` and the server rebuilds the namespaced key internally. |
+| Auth | Cookie and JWT keys are derived from `COOKIE_SIGNING_SALT` **plus** the tenant, and the session cookie is renamed, so a session or API token minted by one instance is rejected by another. |
+| Telemetry | OTel resources carry `service.instance.id` and, with a tenant set, `tenant_id`; Langfuse traces carry the native `environment` field plus a `tenant:<id>` tag and tenant-prefixed trace/session names. |
+
+#### What stays the operator's responsibility
+
+`TENANT_ID` does **not** rewrite infrastructure-level settings. The following must be given distinct values per instance by whoever provisions it:
+
+| Setting | Why it is not derived from `TENANT_ID` |
+| --- | --- |
+| `DATA_DIR` | The data directory is chosen by the operator. Flow file caches, the container `/work` bind mount, screenshots and `installation_id` all live under it, and two instances pointed at the same directory **will overwrite each other's flow data**. Give each instance its own path or its own volume. |
+| `DOCKER_NETWORK` | Instances may legitimately share one Docker network; the application never renames it. Set it explicitly if you want separate networks. |
+| Published ports | `PENTAGI_LISTEN_PORT`, `PGVECTOR_LISTEN_PORT`, `SCRAPER_LISTEN_PORT`, `PPROF_ADDR` and `DOCKER_PORTS_BASE` are host-level resources, not string namespaces. |
+| `INSTALLATION_ID` | Unique per installation, or left empty to be generated once and cached in `DATA_DIR`. |
+| Database privileges | The configured user needs `CREATE SCHEMA`, and on first boot `CREATE EXTENSION` — unless an administrator pre-installed `vector` and `pg_trgm` into `DATABASE_EXTENSIONS_SCHEMA` (default `public`). |
+
+The values actually in effect are written to the startup log under `Instance identity` (`tenant_id`, `data_dir`, `schema`, `installation_id`), which is the quickest way to confirm two instances are not sharing something they should not.
+
+`DOCKER_INSIDE` is orthogonal to tenancy and may be enabled alongside it.
+
+#### Deployment topologies
+
+| Topology | Supported by |
+| --- | --- |
+| One instance per server, shared PostgreSQL and/or worker node | The installer and the stock `docker-compose.yml`, with `TENANT_ID` set per server. This is the intended setup. |
+| Several instances on one server | Manual configuration only. The stock `docker-compose.yml` uses fixed `container_name` and network names, so copying it verbatim will not start a second stack. Adapt it to your network and infrastructure — for example, distinct container names behind a shared nginx — and give each instance its own `DATA_DIR` and ports. |
+
+The installer provisions **one** instance per server; it does not manage several side by side. Note that it does scope the sandbox resources it cleans up — worker containers and volumes are matched by the tenant prefix — so a purge run for one management instance will not remove another's sandboxes from a shared worker node.
+
+**Upgrading an existing deployment.** Leave `TENANT_ID` empty. The instance keeps using `public` and its current data directory; no migration is required. Setting `TENANT_ID` on an existing installation points it at a **new, empty schema** — the data in `public` is not migrated and will appear to be gone. Do not point an existing `public` deployment at a `search_path` that lists another tenant's schema.
+
+#### Extensions installed outside `public` (`DATABASE_EXTENSIONS_SCHEMA`)
+
+`ensureTenantSchema` requires `vector` and `pg_trgm` to already live in (or be creatable in) one schema common to every tenant, because it must be part of every tenant's `search_path`. That schema defaults to `public`, which is where a stock PostgreSQL/`docker-compose.yml` install keeps them.
+
+Managed providers do not always follow that convention. **Supabase** (cloud and self-hosted) installs its bundled extensions into a dedicated `extensions` schema instead, and its default roles get `extensions` added to their `search_path` for exactly that reason. Pointing `DATABASE_URL` at such a database with `TENANT_ID` set fails fast on boot:
+
+```
+Tenant schema initialization failed: extension "vector" is installed in schema "extensions",
+but multi-tenant mode requires it in "public" so every tenant can reach it; either run
+ALTER EXTENSION vector SET SCHEMA public, or set DATABASE_EXTENSIONS_SCHEMA=extensions
+to match where it already lives
+```
+
+Set `DATABASE_EXTENSIONS_SCHEMA=extensions` (or whatever schema the error reports) instead of moving the extension with `ALTER EXTENSION ... SET SCHEMA` — the schema only needs to be part of the `search_path` PentAGI computes (`<tenant>,<DATABASE_EXTENSIONS_SCHEMA>`), moving a provider-managed extension out of its documented location is unnecessary and risks breaking whatever else that provider expects to find it there.
+
+#### Multi-tenant PostgreSQL access through PgBouncer
+
+`DATABASE_URL` can point at a PgBouncer instance instead of PostgreSQL directly, but three things have to be true, independent of each other:
+
+1. **`pool_mode = session` on the PgBouncer side.** PentAGI holds a `pg_advisory_lock`/`pg_advisory_unlock` pair on one dedicated connection across the whole tenant-bootstrap + migration sequence (`backend/pkg/database/tenant.go`), and `pgx` (used by the pgvector pool) caches server-side prepared statements by default. Both break silently under `transaction`/`statement` pooling, because PgBouncer is then free to hand the client a different backend connection between statements. This requirement is unrelated to tenancy — it applies even with `TENANT_ID` empty.
+2. **`ignore_startup_parameters = search_path` in `pgbouncer.ini`.** With a tenant configured, PentAGI's own DSN already carries `?search_path=<tenant>,<DATABASE_EXTENSIONS_SCHEMA>` (see the table above). PgBouncer validates startup parameters from the client against a small built-in allowlist and rejects anything else with `unsupported startup parameter: search_path` unless it is explicitly ignored. Ignoring it does **not** apply the value — it only stops PgBouncer from rejecting the connection — so this step alone is not sufficient; see the next point.
+3. **A `connect_query` per tenant in PgBouncer's `[databases]` section**, since PentAGI's own `search_path` startup parameter is ignored per point 2 above. `connect_query` runs on PgBouncer's own connection to PostgreSQL before any client statement, so it is not subject to the client-facing startup-parameter allowlist and works regardless of pool mode:
+
+   ```ini
+   [databases]
+   pentagi_testing = host=pgvector port=5432 dbname=pentagidb pool_mode=session connect_query='SET search_path TO testing,public'
+   pentagi_acme    = host=pgvector port=5432 dbname=pentagidb pool_mode=session connect_query='SET search_path TO acme,public'
+   ```
+
+   Point each instance's `DATABASE_URL` at its own virtual database name (`pentagi_testing`, `pentagi_acme`, ...) rather than the shared `pentagidb` — PgBouncer pools per `(user, dbname)` pair, so distinct virtual names are what keeps the tenants' pools, and therefore their `connect_query`, apart.
+
+   (`track_extra_parameters = search_path` is PgBouncer's other mechanism for this, but it only works when PostgreSQL reports `search_path` changes back to the client, which requires PostgreSQL 18+ or Citus 12+ — not an option against the PostgreSQL 16/17 that ships in `docker-compose.yml`.)
+
+#### Multi-tenant PostgreSQL through Supabase's Supavisor pooler (`DATABASE_SEARCH_PATH_VIA_OPTIONS`)
+
+Supabase's shared/self-hosted pooler (Supavisor) is not PgBouncer and none of its `[databases]`/`connect_query` configuration exists for it, so the PgBouncer recipe above does not apply. Reports on whether Supavisor forwards a tenant's `search_path` at all are inconsistent — see [supabase/supavisor#206](https://github.com/supabase/supavisor/issues/206) — and depend on the Supavisor version (a parsing fix landed in [PR #768](https://github.com/supabase/supavisor/pull/768)).
+
+If bypassing the pooler entirely (connecting straight to the underlying PostgreSQL, or to a Supabase project's "Direct connection"/IPv4-add-on string) is not an option, set:
+
+```
+DATABASE_SEARCH_PATH_VIA_OPTIONS=true
+```
+
+This sends the tenant's search_path as `options=--search_path=<tenant>,<DATABASE_EXTENSIONS_SCHEMA>` instead of a bare `search_path=` parameter. Some poolers forward the `options` startup parameter through to the real backend while silently dropping an unrecognized bare `search_path` — this is exactly the workaround reported to work against some Supavisor versions. **It is not guaranteed** — verify it actually took effect by checking that the app starts (`verifySearchPath` fails fast with a clear error if it did not) rather than assuming success from the flag alone.
+
+This flag changes nothing for a direct PostgreSQL connection or a PgBouncer setup already following the recipe above; both accept `search_path` and `options` equally, so there is no reason to enable it outside a Supavisor-fronted deployment.
+
+### PentAGI Cloud API Settings
+
+These four are **shared**: one value in one `.env`, read by the installer and by the running PentAGI server alike. The server parses them into the `Config` struct as `UpdateServerHost`, `UpdateStrategy`, `UpdateCheckInterval` and `SupportServerHost`, and `docker-compose.yml` passes all four into the container; the installer's own calls read them straight from the file, and its *Server Settings* form edits every one of them except `UPDATE_CHECK_INTERVAL`, which concerns only the server and is set by hand. There is deliberately no per-component variant of any of them — an installation that pointed the installer at one endpoint and the server at another would be talking about itself in two places at once.
+
+`UPDATE_SERVER_HOST`, together with `INSTALLATION_ID` and `LICENSE_KEY`, is behind every call either side makes to the PentAGI Cloud API: the update check the installer runs while gathering the state of the machine, the package info and download calls behind the installer build it offers, the same pair of calls used to fetch the Jaeger ClickHouse storage plugin whenever the observability stack is updated — that plugin is a file mounted into the container rather than an image, so a broken `UPDATE_SERVER_HOST` stops it from being installed as surely as it stops a check — and the running server's own periodic report, described under [`UPDATE_CHECK_INTERVAL`](#update_check_interval). `UPDATE_STRATEGY` travels only in the update check; the package calls name a component, a version and a platform, and nothing else.
+
+Both sides honour `PROXY_URL`. The installer's own proxy setting takes precedence over `HTTP_PROXY`/`HTTPS_PROXY` in the environment, because it is the one the operator configured deliberately and often the only one carrying credentials. See [Network and Proxy Settings](#network-and-proxy-settings).
+
+#### `UPDATE_STRATEGY`
+
+Which builds this installation is offered. The value is trimmed and lower-cased before it is matched, so `NIGHTLY` and `  preview  ` are accepted. Empty means `preview`; an unrecognised value logs a warning and also falls back to `preview`, deliberately, because a typo must not leave an installation quietly unable to hear about security updates.
+
+| Value | What the installation is offered |
+| --- | --- |
+| `preview` (default) | Pre-release builds from the channels this installation already follows, offered as soon as they are published, without waiting for a release to be cut. The version, changelog and release notes that come with the answer still describe the stack's latest *release*, so they name the last release crossed and not the preview build itself. |
+| `stable` | Only artefacts belonging to the latest curated stable release. The whole installation moves onto one released set, which is what lets it be described by a single version. A component that release does not cover is answered `unknown` with a reason rather than a newer build from elsewhere — offering part of an installation from outside the curated set is exactly the promise `stable` makes. |
+| `nightly` | The newest build published, with no release attached to it. The answer carries no version metadata, so the update overview can report that a newer build exists and little else about it. |
+
+The default is `preview` rather than `stable`, and the difference is not caution versus eagerness. Under `stable` the answer is measured against curated releases, so a stack with no published release is offered nothing at all — which reads as "no updates exist" when it means "we are not publishing releases for this yet". `preview` follows the channels the client is already on, which is what an installation wants until releases are something it can rely on.
+
+The strategy is sent with each update check and applies to every stack in the answer, including the installer's own build — so it also decides which installer version is offered for download. Offered, not applied: the installer downloads that build next to the environment file under a name carrying its version, verifies it, and prints the command that moves it into place. It never writes over the binary it is running — a process cannot reliably replace its own executable, so "download the installer" and "update the installer" are the same operation, and putting the new build in place stays a deliberate step the operator takes.
+
+#### `UPDATE_CHECK_INTERVAL`
+
+How often the **running server** reports its own state to the Cloud API, as a Go duration (`3h` by default, `90m` and `1h30m` are the same value). `0`, or any negative value, disables the report entirely.
+
+This is the other half of the picture the update check cannot see. An installer's check describes the artefacts on the machine and says nothing about the server itself, so an installation deployed once and never started looks exactly like one in daily use. The report closes that gap: on each tick it sends the build that is running, the platform it was compiled for, the sha256 of that binary, and a summary of how the server is configured — quantities and closed vocabularies produced by `GetInstanceSummary`, nothing that identifies a person and nothing anybody wrote. Those first three are read off this process and travel **inside** the summary as well as beside it, because the same summary is what `-info` prints for a caller that will forward it: whoever carries a description cannot produce the platform of the process that wrote it, and the executable's digest is not something an image digest can stand in for.
+
+The answer is kept in memory and shown in the web UI as a version badge — in the main sidebar header and at the bottom of the settings sidebar — read through the `versionInfo` GraphQL query (permission `settings.view`). The badge shows a yellow **↓** when the service names a newer version, and a yellow **?** whenever no verdict is available: the first check has not completed yet, the service could not be reached, it answered without naming a version to move to, it could not match the running build to a published release, or checks are disabled. A verdict, once reached, outlives the failures that follow it — an update that was available an hour ago is still available — so a badge keeps its arrow through an outage and the popover dates both the last answer and the last failure. Nothing is applied from the UI: the tooltip and the popover say to run the installer.
+
+Two properties are worth knowing when reading logs. The first send is delayed by a random wait of up to two minutes, so a fleet restarted at once does not arrive as one burst. And nothing here can interrupt the product: a missing or malformed `INSTALLATION_ID` means the service is never built, every later failure is a debug line, and the next tick simply tries again — an endpoint that is down or a licence that has expired are ordinary states of the world for something the server does not depend on.
+
+#### `UPDATE_SERVER_HOST`
+
+The address is `host[:port]` with **no scheme** — the connection is always TLS, so writing one is redundant. Empty, which is the normal case, means `update.pentagi.com`.
+
+A full URL is still accepted because this setting historically held one: an `https://` prefix is stripped, so is anything after the host (path, query string, fragment), surrounding whitespace is trimmed, and the remainder is lower-cased. What has to be left over is a host, and five shapes are refused outright rather than repaired:
+
+| Value | Result |
+| --- | --- |
+| `http://update.example.com` | **Rejected.** The transport is HTTPS-only, and silently upgrading a value someone deliberately wrote as `http` would hide the misconfiguration instead of reporting it. |
+| Any other scheme (`ftp://`, `tcp://`, ...) | **Rejected** as unsupported. |
+| `https://` or `https:///some/path` | **Rejected** — dropping the scheme and the path leaves nothing, so there is no host to connect to. |
+| `user:pass@update.example.com` | **Rejected** — credentials in the host are not supported. Authentication to the Cloud API is `LICENSE_KEY`, and a proxy's credentials belong in `PROXY_URL`. |
+| `update .example.com` (a space or a tab inside the host) | **Rejected.** Whitespace around the value is trimmed, but whitespace inside it is a typo rather than an address. |
+
+Writing a scheme is the common mistake here, and `https://…` being tolerated makes `http://…` look like it should work too. A rejected value does not abort the installer: the client is never built, the update check is recorded as failed with the reason `unreachable`, and the reason is written to the installer log. The visible symptom is therefore an unreachable update server, which is worth checking the log about before concluding the server is actually down.
+
+The repairs and the refusals above are the installer's. The running server hands the value to the Cloud SDK as written — nothing normalises it and nothing reports it — so a value the SDK cannot build a client from costs one debug line at startup and then no product report at all. Write a bare host and both sides agree.
+
+#### `SUPPORT_SERVER_HOST`
+
+The PentAGI Support API endpoint, in exactly the shape `UPDATE_SERVER_HOST` takes: `host[:port]`, no scheme, empty meaning `support.pentagi.com`. It is a separate service from the update endpoint and is configured separately, so that an installation reaching the Cloud API through a mirror or an internal proxy can point the two at different places.
+
+It is written by the installer's *Server Settings* form and parsed by the server, and no call targets it yet — the support integration that will use it is not in place. Setting it today changes nothing; leaving it empty costs nothing either.
 
 ### Usage Details
 
@@ -235,13 +425,57 @@ These settings control how PentAGI interacts with Docker, which is used for term
 | DockerInside                 | `DOCKER_INSIDE`                    | `false`                | Set to `true` if PentAGI runs inside Docker and needs to access the host Docker daemon. |
 | DockerNetAdmin               | `DOCKER_NET_ADMIN`                 | `false`                | Set to `true` to grant the primary container NET_ADMIN capability for advanced networking. |
 | DockerSocket                 | `DOCKER_SOCKET`                    | *(none)*               | Path to Docker socket for container management |
+| DockerInsideHost             | `DOCKER_INSIDE_HOST`               | *(none)*               | Docker daemon endpoint given to worker containers; also disables host-socket autodetection. See [Worker Docker Access](#worker-docker-access-docker_inside_) |
+| DockerInsideTLSVerify        | `DOCKER_INSIDE_TLS_VERIFY`         | *(none)*               | TLS verification for the worker container's Docker connection |
+| DockerInsideCertPath         | `DOCKER_INSIDE_CERT_PATH`          | *(none)*               | TLS certificate directory **on the worker node**, mounted read-only into worker containers |
+| DockerInsidePolicyTests      | `DOCKER_INSIDE_POLICY_TESTS`       | `false`                | Test the sandbox once at startup: the daemon must be separate from PentAGI's and must refuse host-escape requests. Its only effect is whether agents get Docker — a failure turns the sandbox off and PentAGI still starts. Off by default |
+| DockerDefaultImageForTest    | `DOCKER_DEFAULT_IMAGE_FOR_TEST`    | `vxcontrol/kali-linux:test` | Worker the startup test runs in, and the image it pulls into the sandbox |
 | DockerNetwork                | `DOCKER_NETWORK`                   | *(none)*               | Docker network name for bridge mode, or `host` for host network mode. See network modes below. |
+| DockerNetworkMode | `DOCKER_NETWORK_MODE` | *(none)* | Overrides the sandbox network namespace, e.g. `container:<tenant-sidecar>`; clears sandbox hostname and port publishing. |
 | DockerPublicIP               | `DOCKER_PUBLIC_IP`                 | `0.0.0.0`              | Public IP address for Docker containers' port bindings (bridge mode only) |
 | DockerWorkDir                | `DOCKER_WORK_DIR`                  | *(none)*               | Custom working directory inside Docker containers |
 | DockerDefaultImage           | `DOCKER_DEFAULT_IMAGE`             | `debian:latest`        | Default Docker image for containers when specific images fail |
 | DockerDefaultImageForPentest | `DOCKER_DEFAULT_IMAGE_FOR_PENTEST` | `vxcontrol/kali-linux` | Default Docker image for penetration testing tasks |
 | TerminalToolTimeout          | `TERMINAL_TOOL_TIMEOUT`            | `1200`                 | Default execution timeout in seconds applied when an agent requests `timeout=0` or a negative value. Accepted range: `1`–`10800` (3 hours). Values `<= 0` or above `10800` are clamped to the 3-hour maximum. Negative values are treated identically to `0`. |
 
+### Worker Docker Access (`DOCKER_INSIDE_*`)
+
+`DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH` tell **PentAGI itself** which daemon to create worker containers on. The `DOCKER_INSIDE_*` trio is the mirror image: it tells a **worker container** which daemon *it* may talk to. Both sets are independent — sandboxes can be pointed at a different daemon than the one that spawned them.
+
+They are read only when `DOCKER_INSIDE=true`; with it disabled the sandbox gets no Docker access and no Docker configuration whatsoever.
+
+**How the socket is chosen.** With `DOCKER_INSIDE=true`:
+
+| `DOCKER_SOCKET` | `DOCKER_INSIDE_HOST` | Result |
+| --- | --- | --- |
+| set | empty | That socket is bind-mounted at `/var/run/docker.sock`; this legacy mode does not run the worker policy preflight. |
+| set | set | Configuration error: the socket could bypass the designated worker daemon. |
+| empty | set | **Nothing is mounted.** The sandbox reaches `DOCKER_INSIDE_HOST` and must pass the Docker API policy preflight before agent use. |
+| empty | empty | A local Docker host keeps historical socket autodetection; with a remote `DOCKER_HOST`, initialization fails until a worker endpoint or explicit socket is configured. |
+
+The separate-endpoint row is the point of the feature: mounting the host socket into a sandbox can give an autonomous agent control of the daemon running PentAGI itself, including every other flow's containers. A designated worker daemon must be distinct from the orchestration daemon and enforce the [Docker API policy checked at worker startup](docker.md#docker-api-policy-preflight). An explicit socket remains an unverified legacy exception.
+
+**What is injected.** Every non-empty `DOCKER_INSIDE_*` value is passed into the container as an environment variable with the `_INSIDE_` segment removed, so the Docker CLI inside picks it up with no extra configuration:
+
+| Configured | Seen inside the worker container |
+| --- | --- |
+| `DOCKER_INSIDE_HOST=tcp://dind:2376` | `DOCKER_HOST=tcp://dind:2376` |
+| `DOCKER_INSIDE_TLS_VERIFY=1` | `DOCKER_TLS_VERIFY=1` |
+| `DOCKER_INSIDE_CERT_PATH=/certs/client` | `DOCKER_CERT_PATH=/certs/client` |
+
+Empty values are omitted rather than injected blank.
+
+When `DOCKER_INSIDE_CERT_PATH` is set, that directory is additionally bind-mounted **read-only at the same path** inside the container, so the injected `DOCKER_CERT_PATH` resolves unchanged. The path is resolved on the **worker node** — the machine whose daemon creates sandboxes — which may not be the machine running PentAGI or the installer. For that reason the installer does not verify it exists.
+
+**Example — sandboxes use a DinD sidecar over mutual TLS:**
+
+```bash
+DOCKER_INSIDE=true
+DOCKER_SOCKET=                      # leave empty so the host socket is not mounted
+DOCKER_INSIDE_HOST=tcp://dind:2376
+DOCKER_INSIDE_TLS_VERIFY=1
+DOCKER_INSIDE_CERT_PATH=/certs/client
+```
 
 ### Usage Details
 
@@ -346,6 +580,14 @@ These settings control the HTTP and GraphQL server that forms the backend API of
 | ServerUseSSL | `SERVER_USE_SSL`     | `false`       | Enable SSL for the HTTP server   |
 | ServerSSLKey | `SERVER_SSL_KEY`     | *(none)*      | Path to SSL key file             |
 | ServerSSLCrt | `SERVER_SSL_CRT`     | *(none)*      | Path to SSL certificate file     |
+
+| Option         | Environment Variable | Default Value | Description                                                        |
+| -------------- | -------------------- | ------------- | ------------------------------------------------------------------ |
+| TrustedProxies | `TRUSTED_PROXIES`    | *(none)*      | Comma-separated proxies whose `X-Forwarded-For` the server believes |
+
+Left empty behind a reverse proxy, every request is attributed to the proxy's own
+address, so the per-address login rate limit becomes a single budget shared by all
+users. Set it to the addresses or CIDRs of the proxies in front of PentAGI.
 
 ### Usage Details
 
@@ -563,6 +805,27 @@ These settings control the integration with various Large Language Model (LLM) p
 | AnthropicAPIKey    | `ANTHROPIC_API_KEY`    | *(none)*                       | API key for Anthropic Claude services |
 | AnthropicServerURL | `ANTHROPIC_SERVER_URL` | `https://api.anthropic.com/v1` | Server URL for Anthropic API requests |
 
+#### Workload Identity Federation
+
+Instead of a long-lived key, the Anthropic provider can exchange a short-lived identity token issued by your identity provider (AWS, Google Cloud, Azure, GitHub Actions, Kubernetes, any OIDC issuer) for a Claude API access token, refreshed before it expires. The variables are the ones the vendor SDKs read; see [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation) for creating the service account, issuer and rule.
+
+| Option                     | Environment Variable            | Default Value | Description                                                                                  |
+| -------------------------- | ------------------------------- | ------------- | -------------------------------------------------------------------------------------------- |
+| AnthropicFederationRuleID  | `ANTHROPIC_FEDERATION_RULE_ID`  | *(none)*      | Federation rule to exchange under (`fdrl_...`)                                               |
+| AnthropicOrganizationID    | `ANTHROPIC_ORGANIZATION_ID`     | *(none)*      | Anthropic organization UUID                                                                  |
+| AnthropicServiceAccountID  | `ANTHROPIC_SERVICE_ACCOUNT_ID`  | *(none)*      | Service account the minted token acts as (`svac_...`)                                        |
+| AnthropicWorkspaceID       | `ANTHROPIC_WORKSPACE_ID`        | *(none)*      | Workspace to scope the token to; required when the rule covers more than one workspace       |
+| AnthropicIdentityTokenFile | `ANTHROPIC_IDENTITY_TOKEN_FILE` | *(none)*      | Path to the identity token, re-read on every exchange; takes precedence over the token below |
+| AnthropicIdentityToken     | `ANTHROPIC_IDENTITY_TOKEN`      | *(none)*      | The identity token itself; read once, so only for runs shorter than its lifetime             |
+
+Federation is used only while `ANTHROPIC_API_KEY` is empty: a non-empty key shadows it, and the server log says so at startup. A partial federation config leaves the provider disabled and the log names the missing variables. The token file path is read inside the pentagi container, so mount the file there. The exchange goes to `ANTHROPIC_SERVER_URL` + `/oauth/token`, so federation works against the Anthropic API itself and not through a gateway.
+
+Every provider, flow and settings test that uses the same federation rule, organization, service account, workspace and server URL shares one access token, exchanged once and refreshed the way the vendor SDKs do: from two minutes before it expires a failed exchange keeps serving the cached token and logs a warning that names the time calls start to fail, and from 30 seconds before it the call fails. Both points move closer for a token that lives only a few minutes, so it is not exchanged again on every call.
+
+An identity token that carries a `jti` claim, as Kubernetes service-account and GitHub Actions tokens do, can be exchanged only once; presenting it again is refused with `jti_reused`. The token file must therefore hold a new token before each refresh, so the platform has to rotate it well within the lifetime of the minted token: the rule's `token_lifetime_seconds`, capped at twice the remaining lifetime of the identity token. A Kubernetes projected token is rotated at 80% of its `expirationSeconds`, about 48 minutes by default, which is too slow for a rule that mints ten-minute tokens.
+
+`ANTHROPIC_IDENTITY_TOKEN` is read once at startup and cannot be rotated: once the identity token expires, and after its first exchange if it carries `jti`, the provider cannot mint a new access token. It suits only runs shorter than the identity token's lifetime, the server log warns about it at startup and names the expiry, and a long-running server needs the token file.
+
 **Note on Google Vertex AI**: PentAGI does not currently expose a dedicated Vertex AI configuration path for Anthropic Claude in `.env`. The variables above target the direct Anthropic API. To run Claude through a non-Anthropic-hosted backend, use one of:
 
 - **AWS Bedrock**: see the [AWS Bedrock LLM Provider](#aws-bedrock-llm-provider) section below and configure the `BEDROCK_*` variables.
@@ -606,6 +869,7 @@ There is no `VERTEX_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` variable wired 
 | BedrockSecretKey    | `BEDROCK_SECRET_ACCESS_KEY` | *(none)*      | AWS secret access key for static credentials authentication                                                              |
 | BedrockSessionToken | `BEDROCK_SESSION_TOKEN`     | *(none)*      | AWS session token for temporary credentials (optional, used with static credentials for STS/assumed roles)               |
 | BedrockServerURL    | `BEDROCK_SERVER_URL`        | *(none)*      | Optional custom endpoint URL for Bedrock service (VPC endpoints, local testing)                                          |
+| BedrockConfig       | `BEDROCK_CONFIG_PATH`       | *(none)*      | Path to a custom YAML config that replaces the built-in Bedrock per-agent config (model assignments, prices)             |
 
 **Authentication Priority**: `BedrockDefaultAuth` (highest) → `BedrockBearerToken` → `BedrockAccessKey`+`BedrockSecretKey` (lowest)
 
@@ -617,7 +881,7 @@ There is no `VERTEX_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` variable wired 
 | DeepSeekServerURL | `DEEPSEEK_SERVER_URL` | `https://api.deepseek.com` | DeepSeek API endpoint URL                                |
 | DeepSeekProvider  | `DEEPSEEK_PROVIDER`   | *(none)*                   | Provider name prefix for LiteLLM integration (optional)  |
 
-**LiteLLM Integration**: Set `DEEPSEEK_PROVIDER=deepseek` to enable model prefixing (e.g., `deepseek/deepseek-v4-flash`) when using LiteLLM proxy with default PentAGI configs.
+**LiteLLM Integration**: Set `DEEPSEEK_PROVIDER=deepseek` to enable model prefixing (e.g., `deepseek/deepseek-flash`) when using LiteLLM proxy with default PentAGI configs.
 
 ### GLM LLM Provider
 
@@ -646,22 +910,52 @@ There is no `VERTEX_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` variable wired 
 - International: `https://api.moonshot.ai/v1` (default)
 - China: `https://api.moonshot.cn/v1`
 
-**LiteLLM Integration**: Set `KIMI_PROVIDER=moonshot` to enable model prefixing (e.g., `moonshot/kimi-k2.5`) when using LiteLLM proxy with default PentAGI configs.
+**LiteLLM Integration**: Set `KIMI_PROVIDER=moonshot` to enable model prefixing (e.g., `moonshot/kimi-k2.6`) when using LiteLLM proxy with default PentAGI configs.
 
 ### Qwen LLM Provider
 
 | Option          | Environment Variable | Default Value                                          | Description                                              |
 | --------------- | -------------------- | ------------------------------------------------------ | -------------------------------------------------------- |
-| QwenAPIKey      | `QWEN_API_KEY`       | *(none)*                                               | Qwen API key for authentication                          |
-| QwenServerURL   | `QWEN_SERVER_URL`    | `https://dashscope-us.aliyuncs.com/compatible-mode/v1` | Qwen API endpoint URL (international)                    |
-| QwenProvider    | `QWEN_PROVIDER`      | *(none)*                                               | Provider name prefix for LiteLLM integration (optional)  |
+| QwenAPIKey      | `QWEN_API_KEY`       | *(none)*                                               | Qwen Cloud, DashScope, or gateway API key                |
+| QwenServerURL   | `QWEN_SERVER_URL`    | `https://dashscope-us.aliyuncs.com/compatible-mode/v1` | Direct DashScope or OpenAI-compatible gateway URL        |
+| QwenProvider    | `QWEN_PROVIDER`      | *(none)*                                               | Gateway model prefix: `qwen_cloud` or `dashscope`        |
 
 **Alternative Endpoints**:
 - US: `https://dashscope-us.aliyuncs.com/compatible-mode/v1` (default)
 - Singapore: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
 - China: `https://dashscope.aliyuncs.com/compatible-mode/v1`
 
-**LiteLLM Integration**: Set `QWEN_PROVIDER=dashscope` to enable model prefixing (e.g., `dashscope/qwen-plus`) when using LiteLLM proxy with default PentAGI configs.
+**LiteLLM Integration**: Set `QWEN_PROVIDER=qwen_cloud` for Qwen Cloud routes or `QWEN_PROVIDER=dashscope` for Alibaba Cloud routes. The bundled role configuration uses only model IDs shared by both platforms.
+
+### MiniMax LLM Provider
+
+| Option           | Environment Variable | Default Value               | Description                                             |
+| ---------------- | -------------------- | --------------------------- | ------------------------------------------------------- |
+| MiniMaxAPIKey    | `MINIMAX_API_KEY`    | *(none)*                    | MiniMax API key for authentication                      |
+| MiniMaxServerURL | `MINIMAX_SERVER_URL` | `https://api.minimax.io/v1` | MiniMax API endpoint URL                                |
+| MiniMaxProvider  | `MINIMAX_PROVIDER`   | *(none)*                    | Provider name prefix for LiteLLM integration (optional) |
+
+**LiteLLM Integration**: Set `MINIMAX_PROVIDER=minimax` to enable model prefixing (e.g., `minimax/MiniMax-M3`) when using LiteLLM proxy with default PentAGI configs.
+
+### Mistral LLM Provider
+
+| Option           | Environment Variable | Default Value                | Description                                             |
+| ---------------- | -------------------- | ---------------------------- | ------------------------------------------------------- |
+| MistralAPIKey    | `MISTRAL_API_KEY`    | *(none)*                     | Mistral API key for authentication                      |
+| MistralServerURL | `MISTRAL_SERVER_URL` | `https://api.mistral.ai/v1`  | Mistral API endpoint URL                                |
+| MistralProvider  | `MISTRAL_PROVIDER`   | *(none)*                     | Provider name prefix for LiteLLM integration (optional) |
+
+**LiteLLM Integration**: Set `MISTRAL_PROVIDER=mistral` to enable model prefixing (e.g., `mistral/mistral-medium-latest`) when using LiteLLM proxy with default PentAGI configs.
+
+### xAI (Grok) LLM Provider
+
+| Option       | Environment Variable | Default Value          | Description                                             |
+| ------------ | -------------------- | ---------------------- | ------------------------------------------------------- |
+| XAIAPIKey    | `XAI_API_KEY`        | *(none)*               | xAI API key for authentication                          |
+| XAIServerURL | `XAI_SERVER_URL`     | `https://api.x.ai/v1`  | xAI API endpoint URL                                    |
+| XAIProvider  | `XAI_PROVIDER`       | *(none)*               | Provider name prefix for LiteLLM integration (optional) |
+
+**LiteLLM Integration**: Set `XAI_PROVIDER=xai` to enable model prefixing (e.g., `xai/grok-4.3`) when using LiteLLM proxy with default PentAGI configs.
 
 ### Custom LLM Provider
 
@@ -672,8 +966,9 @@ There is no `VERTEX_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` variable wired 
 | LLMServerModel             | `LLM_SERVER_MODEL`              | *(none)*      | Model name for custom LLM provider                                           |
 | LLMServerConfig            | `LLM_SERVER_CONFIG_PATH`        | *(none)*      | Path to config file for custom LLM provider options                          |
 | LLMServerProvider          | `LLM_SERVER_PROVIDER`           | *(none)*      | Provider name prefix for model names (useful for LiteLLM proxy)              |
-| LLMServerLegacyReasoning   | `LLM_SERVER_LEGACY_REASONING`   | `false`       | Controls reasoning format in API requests                                    |
 | LLMServerPreserveReasoning | `LLM_SERVER_PRESERVE_REASONING` | `false`       | Preserve reasoning content in multi-turn conversations (required by some providers) |
+| LLMServerAPIType           | `LLM_SERVER_API_TYPE`           | *(none)*      | `azure` or `azure_ad` to talk to an Azure OpenAI deployment; empty for a plain OpenAI-compatible endpoint |
+| LLMServerAPIVersion        | `LLM_SERVER_API_VERSION`        | `2024-10-21`  | Azure OpenAI API version, used only when `LLM_SERVER_API_TYPE` names an Azure mode |
 
 ### Usage Details
 
@@ -780,20 +1075,6 @@ The LLM provider settings are used in `pkg/providers` modules to initialize and 
   }
   ```
 
-- **LLMServerLegacyReasoning**: Controls the reasoning format used in API requests to custom LLM providers:
-  ```go
-  // Used in custom provider to determine reasoning format
-  if cfg.LLMServerLegacyReasoning {
-      // Uses legacy string-based reasoning_effort parameter
-  } else {
-      // Uses modern structured reasoning object with max_tokens
-  }
-  ```
-  - `false` (default): Uses modern format where reasoning is sent as a structured object with `max_tokens` parameter
-  - `true`: Uses legacy format with string-based `reasoning_effort` parameter
-
-This setting is important when working with different LLM providers as they may expect different reasoning formats in their API requests. If you encounter reasoning-related errors with custom providers, try changing this setting.
-
 - **LLMServerPreserveReasoning**: Controls whether reasoning content is preserved and sent back in multi-turn conversations:
   ```go
   // Used in custom provider to preserve reasoning content
@@ -806,58 +1087,64 @@ This setting is important when working with different LLM providers as they may 
 
 This setting is required by some LLM providers (e.g., Moonshot) that return errors like "thinking is enabled but reasoning_content is missing in assistant tool call message" when reasoning content is not included in multi-turn conversations. Enable this setting if your provider requires reasoning content to be preserved across conversation turns.
 
-The provider registration is managed in `pkg/providers/providers.go`:
+Provider registration is table-driven. `pkg/providers/registry.go` holds one entry per
+provider type and `pkg/providers/providers.go` walks it; nothing enumerates providers by hand:
 
 ```go
-// Provider registration based on available credentials
-if cfg.OpenAIKey != "" {
-    p, err := openai.New(cfg, defaultConfigs[provider.ProviderOpenAI])
-    if err != nil {
-        return nil, fmt.Errorf("failed to create openai provider: %w", err)
-    }
-    providers[provider.DefaultProviderNameOpenAI] = p
+// pkg/providers/registry.go
+type registryEntry struct {
+    Type        provider.ProviderType
+    Name        provider.ProviderName
+    Enabled     func(*config.Config) bool
+    NewConfig   func(*config.Config) (*pconfig.ProviderConfig, error)
+    New         func(*config.Config, provider.ProviderName, *pconfig.ProviderConfig) (provider.Provider, error)
+    BuildConfig func(*config.Config, []byte) (*pconfig.ProviderConfig, error)
 }
 
-if cfg.AnthropicAPIKey != "" {
-    p, err := anthropic.New(cfg, defaultConfigs[provider.ProviderAnthropic])
-    if err != nil {
-        return nil, fmt.Errorf("failed to create anthropic provider: %w", err)
-    }
-    providers[provider.DefaultProviderNameAnthropic] = p
-}
-
-if cfg.GeminiAPIKey != "" {
-    p, err := gemini.New(cfg, defaultConfigs[provider.ProviderGemini])
-    if err != nil {
-        return nil, fmt.Errorf("failed to create gemini provider: %w", err)
-    }
-    providers[provider.DefaultProviderNameGemini] = p
-}
-
-if cfg.BedrockAccessKey != "" && cfg.BedrockSecretKey != "" {
-    p, err := bedrock.New(cfg, defaultConfigs[provider.ProviderBedrock])
-    if err != nil {
-        return nil, fmt.Errorf("failed to create bedrock provider: %w", err)
-    }
-    providers[provider.DefaultProviderNameBedrock] = p
-}
-
-if cfg.OllamaServerURL != "" {
-    p, err := ollama.New(cfg, defaultConfigs[provider.ProviderOllama])
-    if err != nil {
-        return nil, fmt.Errorf("failed to create ollama provider: %w", err)
-    }
-    providers[provider.DefaultProviderNameOllama] = p
-}
-
-if cfg.LLMServerURL != "" && (cfg.LLMServerModel != "" || cfg.LLMServerConfig != "") {
-    p, err := custom.New(cfg, defaultConfigs[provider.ProviderCustom])
-    if err != nil {
-        return nil, fmt.Errorf("failed to create custom provider: %w", err)
-    }
-    providers[provider.DefaultProviderNameCustom] = p
+var providerRegistry = []registryEntry{
+    {
+        Type:        provider.ProviderOpenAI,
+        Name:        provider.DefaultProviderNameOpenAI,
+        Enabled:     func(c *config.Config) bool { return c.OpenAIKey != "" },
+        NewConfig:   ignoreConfig(openai.DefaultProviderConfig),
+        New:         openai.New,
+        BuildConfig: fromData(openai.BuildProviderConfig),
+    },
+    // ... one entry per provider type
 }
 ```
+
+`Enabled` is where the credential gate lives — a deployment without a given key simply ends
+up with fewer providers rather than a failed startup:
+
+```go
+// pkg/providers/providers.go
+for _, e := range providerRegistry {
+    if !e.Enabled(cfg) {
+        continue
+    }
+
+    p, err := e.New(cfg, e.Name, defaultConfigs[e.Type])
+    if err != nil {
+        return nil, fmt.Errorf("failed to create %s provider: %w", e.Type, err)
+    }
+
+    providers[e.Name] = p
+}
+```
+
+`defaultConfigs` comes from the same table: `buildDefaultConfigs` calls every entry's
+`NewConfig` beforehand, and a config that fails to load aborts startup unless that provider
+is disabled anyway, in which case the reason is recorded and reported later. `BuildConfig`
+is the same construction from stored bytes, used through `entryForType` when a user-defined
+provider or a provider test rebuilds one at request time.
+
+An entry may also wrap its constructor. The custom provider's does, to hand the transport the
+same catalogue enrichment the picker sees — its models come from the gateway at runtime, so
+the reasoning metadata the bundled `models.yml` files carry has to be folded in on the way.
+
+Adding a provider is therefore adding one entry; the full checklist is in the repository root
+`CLAUDE.md` under "Adding a New LLM Provider".
 
 These settings are critical for:
 - Connecting to various LLM providers for AI capabilities
@@ -1400,6 +1687,7 @@ Common built-in functions that can be disabled:
 - `google` - Google Search
 - `duckduckgo` - DuckDuckGo Search
 - `tavily` - Tavily Search
+- `firecrawl` - Firecrawl Search
 - `traversaal` - Traversaal Search
 - `perplexity` - Perplexity Search
 - `searxng` - SearXNG Search
@@ -1447,12 +1735,19 @@ These settings control the integration with various search engines used for web 
 | ------------ | -------------------- | ------------- | -------------------------------- |
 | TavilyAPIKey | `TAVILY_API_KEY`     | *(none)*      | API key for Tavily search engine |
 
+### Firecrawl Search
+
+| Option          | Environment Variable | Default Value               | Description                                                                    |
+| --------------- | -------------------- | --------------------------- | ------------------------------------------------------------------------------ |
+| FirecrawlAPIKey | `FIRECRAWL_API_KEY`  | *(none)*                    | API key for Firecrawl search engine                                            |
+| FirecrawlAPIURL | `FIRECRAWL_API_URL`  | `https://api.firecrawl.dev` | Base URL for the Firecrawl API (override to point at a self-hosted deployment) |
+
 ### Perplexity Search
 
 | Option                | Environment Variable      | Default Value | Description                                                  |
 | --------------------- | ------------------------- | ------------- | ------------------------------------------------------------ |
 | PerplexityAPIKey      | `PERPLEXITY_API_KEY`      | *(none)*      | API key for Perplexity search engine                         |
-| PerplexityModel       | `PERPLEXITY_MODEL`        | `sonar`       | Model to use for Perplexity search                           |
+| PerplexityModel       | `PERPLEXITY_MODEL`        | `sonar`       | Model sent to the Perplexity chat/completions API (`sonar`, `sonar-pro`, …); passed through verbatim |
 | PerplexityContextSize | `PERPLEXITY_CONTEXT_SIZE` | `low`         | Context size for Perplexity search (`low`, `medium`, `high`) |
 
 ### Searxng Search
@@ -1465,6 +1760,16 @@ These settings control the integration with various search engines used for web 
 | SearxngSafeSearch | `SEARXNG_SAFESEARCH` | `0`           | Safe search filter level (`0` = none, `1` = moderate, `2` = strict) |
 | SearxngTimeRange  | `SEARXNG_TIME_RANGE` | *(none)*      | Time range filter (e.g., `day`, `month`, `year`)                    |
 | SearxngTimeout    | `SEARXNG_TIMEOUT`    | *(none)*      | Request timeout in seconds for Searxng API calls                    |
+
+### Internal Analytics Engine
+
+An optional, opt-in fallback engine for the `web_search` tool's analytic modes (`answer`/`research`). When enabled, it discovers links via the first available link engine, fetches each page's main-content markdown through the browser scraper, and asks the summarizer to synthesize a query-focused answer — without a paid analytic API. Off by default because per-page scraping and summarization can cost more than a purpose-built third-party analytic call. Requires a configured scraper and at least one available link engine (e.g. DuckDuckGo, Google).
+
+| Option                        | Environment Variable                 | Default Value | Description                                                   |
+| ----------------------------- | ------------------------------------- | -------------- | -------------------------------------------------------------- |
+| WebSearchInternalEnabled      | `WEB_SEARCH_INTERNAL_ENABLED`         | `false`        | Enable or disable the internal browser-analytics engine        |
+| WebSearchInternalMaxSites     | `WEB_SEARCH_INTERNAL_MAX_SITES`       | `5`            | Maximum number of pages to fetch and summarize per query       |
+| WebSearchInternalMaxSiteBytes | `WEB_SEARCH_INTERNAL_MAX_SITE_BYTES`  | `10240`        | Maximum markdown bytes read from each page before truncation   |
 
 ### Usage Details
 
@@ -1491,6 +1796,16 @@ tavilySearch: &functions.TavilySearchFunc{
     proxyURL:   fte.cfg.ProxyURL,
     summarizer: cfg.Summarizer,
 },
+
+// Firecrawl Search configuration (FirecrawlAPIKey / FirecrawlAPIURL read from fte.cfg)
+firecrawl := NewFirecrawlTool(
+    fte.cfg,
+    fte.flowID,
+    cfg.TaskID,
+    cfg.SubtaskID,
+    fte.slp,
+    cfg.Summarizer,
+)
 
 // Perplexity Search configuration
 perplexitySearch: &functions.PerplexitySearchFunc{
@@ -1579,7 +1894,7 @@ googleSearch: &functions.GoogleSearchFunc{
 ```
 
 The proxy setting is essential for:
-- Routing all outbound API requests through a controlled proxy
+- Routing the backend's LLM, embedding, search and update-check requests through a controlled proxy (sandbox containers, the scraper and Graphiti do not use it)
 - Implementing network-level security policies
 - Enabling access to external services from restricted networks
 - Monitoring and auditing external API usage
@@ -1627,64 +1942,64 @@ The SSL settings provide additional security configuration:
 
 ## Graphiti Knowledge Graph Settings
 
-> The Graphiti integration is currently a **beta** feature with notable provider limitations. See [Current Limitations (Beta)](#current-limitations-beta) at the end of this section before enabling it in production.
+Graphiti is an optional beta integration. This section documents the PentAGI-side configuration boundary and lifecycle; the operator-facing deployment, provider, ingestion, extraction, and Neo4j settings are maintained in [README.md — Knowledge Graph Integration](../../README.md#knowledge-graph-integration-graphiti).
 
-These settings control the integration with Graphiti, a temporal knowledge graph system powered by Neo4j, for advanced semantic understanding and relationship tracking of AI agent operations.
+### PentAGI Configuration Boundary
 
-| Option          | Environment Variable | Default Value           | Description                                            |
-| --------------- | -------------------- | ----------------------- | ------------------------------------------------------ |
-| GraphitiEnabled | `GRAPHITI_ENABLED`   | `false`                 | Enable or disable Graphiti knowledge graph integration |
-| GraphitiURL     | `GRAPHITI_URL`       | `http://localhost:8001` | Base URL for Graphiti API service                      |
-| GraphitiTimeout | `GRAPHITI_TIMEOUT`   | `30`                    | Timeout in seconds for Graphiti operations             |
+`pkg/config.Config` intentionally owns only the settings required by the PentAGI process:
 
-### Usage Details
+| Field | Environment Variable | Default | Responsibility |
+| --- | --- | --- | --- |
+| `GraphitiEnabled` | `GRAPHITI_ENABLED` | `false` | Operator intent to enable the integration |
+| `GraphitiURL` | `GRAPHITI_URL` | *(empty)* | Graphiti API base URL; embedded deployments use `http://graphiti:8000` |
+| `GraphitiTimeout` | `GRAPHITI_TIMEOUT` | `30` seconds | Timeout used for Graphiti client requests and storage contexts |
 
-The Graphiti settings are used in `pkg/graphiti/client.go` and integrated throughout the provider system to automatically capture agent interactions and tool executions:
+All other variables with `GRAPHITI_*`, `NEO4J_*`, provider, embedding, ingest, extraction, anchor, or logging names configure `docker-compose-graphiti.yml` or the Graphiti process. They are not parsed into the Go `Config` struct. Keep that boundary explicit when adding settings: a value needed by PentAGI belongs in `pkg/config/config.go`; a value consumed only by the sidecar belongs in `.env.example` plus the compose mapping.
 
-- **GraphitiEnabled**: Controls whether the knowledge graph integration is active:
-  ```go
-  // Check if Graphiti is enabled
-  if !cfg.GraphitiEnabled {
-      return &Client{enabled: false}, nil
-  }
-  ```
+The provider controller applies an additional URL guard:
 
-- **GraphitiURL**: Specifies the Graphiti API endpoint:
-  ```go
-  client := graphiti.NewClient(cfg.GraphitiURL, timeout, cfg.GraphitiEnabled)
-  ```
+```go
+graphitiClient, err := graphiti.NewClient(
+    cfg.GraphitiURL,
+    time.Duration(cfg.GraphitiTimeout)*time.Second,
+    cfg.GraphitiEnabled && cfg.GraphitiURL != "",
+)
+```
 
-- **GraphitiTimeout**: Sets the maximum time for knowledge graph operations:
-  ```go
-  timeout := time.Duration(cfg.GraphitiTimeout) * time.Second
-  storeCtx, cancel := context.WithTimeout(ctx, timeout)
-  defer cancel()
-  ```
+Consequently, `GRAPHITI_ENABLED=true` with an empty URL still creates a disabled wrapper.
 
-The Graphiti integration captures:
-- Agent responses and reasoning for all agent types (pentester, researcher, coder, etc.)
-- Tool execution details including function name, arguments, results, and execution status
-- Context information including flow, task, and subtask IDs for hierarchical organization
-- Temporal relationships between entities, actions, and outcomes
+### Client Lifecycle and Failure Behavior
 
-These settings enable:
-- Building a comprehensive knowledge base from agent interactions
-- Semantic memory across multiple penetration tests
-- Advanced querying of relationships between tools, targets, and techniques
-- Learning from past successful approaches and strategies
+`pkg/graphiti/client.go` wraps `graphiti-go-client` and performs a synchronous health check during provider initialization. It makes three attempts with a two-second backoff. A final failure is returned to `pkg/providers/providers.go`, which logs a warning and substitutes a disabled client so the rest of PentAGI can start.
 
-The integration is designed to be non-blocking - if Graphiti operations fail, they are logged but don't interrupt the agent workflow.
+The disabled wrapper has deliberate asymmetric behavior:
 
-### Current Limitations (Beta)
+- `AddMessages` is a no-op, allowing normal flow execution to continue.
+- Search methods return `graphiti is not enabled`; disabled clients are normally excluded from agent tool registration and prompts through `IsEnabled`.
+- Storage calls use `GraphitiTimeout`, log failures with their group ID, and return the error to the caller without making Graphiti a required persistence layer.
 
-The Graphiti integration is currently a beta feature. Operators should plan around the following constraints before enabling it in production:
+Do not change initialization failures into fatal PentAGI startup errors without treating that as a deployment-contract change.
 
-- **OpenAI-compatible LLM only.** Operators configure the endpoint through PentAGI's `.env` variables `OPEN_AI_KEY` and `OPEN_AI_SERVER_URL` (default `https://api.openai.com/v1`); `docker-compose-graphiti.yml` maps these into the bundled `vxcontrol/graphiti` container as `OPENAI_API_KEY` and `OPENAI_BASE_URL`, which it uses to drive entity extraction. Provider credentials configured elsewhere in PentAGI for Anthropic, Google AI (Gemini), AWS Bedrock, DeepSeek, GLM, Kimi, or Qwen are not consumed by Graphiti.
-- **Single fixed model per deployment.** Graphiti uses one model name (`GRAPHITI_MODEL_NAME`, default `gpt-5-mini`) for all extractions; per-agent or per-flow selection is not supported.
-- **Independent billing.** Graphiti billing is tied to the configured OpenAI-compatible endpoint, even when the main flow runs against a non-OpenAI provider.
-- **No in-app graph explorer yet.** The captured graph is inspected through the Neo4j Browser at `http://localhost:7474` and the Graphiti Swagger UI at `http://localhost:8000/docs`; there is no PentAGI UI surface for it today.
+### Data Flow, Search, and Tenancy
 
-If your deployment cannot reach an OpenAI-compatible endpoint, set `GRAPHITI_ENABLED=false`. The rest of PentAGI continues to function without the knowledge graph.
+Provider performers render `backend/pkg/templates/graphiti/*.tmpl` and enqueue agent responses and tool executions with observation metadata. The sidecar applies ingest policy and performs asynchronous extraction; successful submission does not imply that the graph is immediately searchable.
+
+Enabled agents receive the `graphiti_search` tool. Its seven modes map to temporal-window, entity-relationship, diverse-result, episode-context, successful-tool, recent-context, and entity-by-label client methods. Transport and server failures are handled as degradable tool failures where possible, while malformed arguments and validation errors remain hard errors so the LLM can repair its call.
+
+Every request is partitioned by `Config.GroupID(flowID)`:
+
+- without `TENANT_ID`: `flow-<id>`;
+- with `TENANT_ID`: `<tenant>-flow-<id>`.
+
+`Config.ParseGroupID` rejects identifiers belonging to another tenant. Keep `GroupID` and `ParseGroupID` exact inverses, and never accept a client-supplied namespace in place of a server-derived group ID. The stock deployment also sets `GRAPHITI_SEARCH_SCOPE=flowid`; changing it to global search bypasses this retrieval boundary inside Graphiti and is unsafe for shared deployments.
+
+### Deployment Ownership
+
+The bundled stack is separate from `docker-compose.yml`. The installer distinguishes disabled, external, and embedded deployments using `GRAPHITI_ENABLED` and `GRAPHITI_URL`; `http://graphiti:8000` is the embedded endpoint. It starts the Graphiti stack before PentAGI so the startup health check can succeed.
+
+Installer assets include `docker-compose-graphiti.yml` and the `graphiti` preset directory sourced from `examples/graphiti`. The target directory is checked, repaired, and removed with the Graphiti stack. Compose mounts it through `GRAPHITI_CONFIG_PATH` and `GRAPHITI_CONFIG_DIR`; the fallback target `configs` prevents a newer compose file paired with an older `.env` from masking the image's built-in `llm_configs` with an empty host directory.
+
+Models and call parameters belong to the provider YAML presets, selected by `GRAPHITI_LLM_CLIENT_TYPE`; they are not fields in the PentAGI Go configuration. `GRAPHITI_MODEL_NAME` is obsolete. Refer operators to the README instead of duplicating the sidecar's tuning reference here.
 
 ## Agent Supervision Settings
 

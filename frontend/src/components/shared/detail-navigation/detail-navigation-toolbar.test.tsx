@@ -7,8 +7,9 @@ import { describe, expect, it } from 'vitest';
 
 import { TooltipProvider } from '@/components/ui/tooltip';
 
+import { DetailNavigationButtons } from './detail-navigation-buttons';
 import { DetailNavigationToolbar } from './detail-navigation-toolbar';
-import { useDetailNavigation } from './use-detail-navigation';
+import { type DetailNavigationController, useDetailNavigation } from './use-detail-navigation';
 
 interface Item {
     id: string;
@@ -29,7 +30,7 @@ const LocationReadout = () => {
     const { pathname, search } = useLocation();
 
     return (
-        <span data-testid="location">
+        <span data-slot="probe-location">
             {pathname}
             {search}
         </span>
@@ -80,10 +81,44 @@ const renderToolbar = (props: HarnessProps = {}) => {
 };
 
 describe('DetailNavigationToolbar', () => {
-    it('renders nothing when raw items is empty', () => {
+    it('renders a disabled cluster when raw items is empty', () => {
         renderToolbar({ items: [] });
-        expect(screen.queryByRole('button', { name: /Previous/i })).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: /Next/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Previous/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /Next/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /–\/0/ })).toBeDisabled();
+    });
+
+    it.each([
+        { expected: '7ch', total: 0 },
+        { expected: '7ch', total: 4 },
+        { expected: '7ch', total: 150 },
+        { expected: '9ch', total: 1500 },
+        { expected: '11ch', total: 99999 },
+    ])('reserves $expected of counter width for a set of $total', ({ expected, total }) => {
+        // Do not mount 99999 real items: that path times out under CI's default 5s testTimeout.
+        const controller = {
+            goToNext: () => undefined,
+            goToPrev: () => undefined,
+            hasEntries: true,
+            nextId: 'next',
+            openSheet: () => undefined,
+            positionLabel: `1/${total}`,
+            prevId: null,
+            total,
+        } as DetailNavigationController<Item>;
+
+        render(
+            <TooltipProvider>
+                <DetailNavigationButtons
+                    controller={controller}
+                    sheetTitle="Items"
+                />
+            </TooltipProvider>,
+        );
+
+        expect(screen.getByRole('button', { name: new RegExp(`1/${total}`) }).firstElementChild).toHaveStyle({
+            minWidth: expected,
+        });
     });
 
     it('composes Buttons + Sheet: position button opens the listbox', async () => {
@@ -122,9 +157,9 @@ describe('DetailNavigationToolbar', () => {
         await user.click(screen.getByRole('button', { name: /Next/i }));
 
         await waitFor(() => {
-            expect(screen.getByTestId('location').textContent).toContain('/items/b');
+            expect(screen.getByTestId('probe-location').textContent).toContain('/items/b');
         });
-        expect(screen.getByTestId('location').textContent).toContain('q=a');
+        expect(screen.getByTestId('probe-location').textContent).toContain('q=a');
     });
 
     it('disables the position button when the filter excludes every item', async () => {

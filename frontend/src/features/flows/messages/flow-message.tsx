@@ -8,6 +8,7 @@ import Terminal from '@/components/shared/terminal';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { MessageLogType, ResultFormat } from '@/graphql/types';
 import { copyMessageToClipboard } from '@/lib/clipboard';
+import { matchesSearchTerm } from '@/lib/text-filter';
 import { cn } from '@/lib/utils';
 import { formatDate } from '@/lib/utils/format';
 
@@ -17,14 +18,6 @@ interface FlowMessageProps {
     log: AssistantLogFragmentFragment | MessageLogFragmentFragment;
     searchValue?: string;
 }
-
-const containsSearchValue = (text: null | string | undefined, searchValue: string): boolean => {
-    if (!text || !searchValue.trim()) {
-        return false;
-    }
-
-    return text.toLowerCase().includes(searchValue.toLowerCase().trim());
-};
 
 function FlowMessage({ log, searchValue = '' }: FlowMessageProps) {
     const { createdAt, message, result, resultFormat = ResultFormat.Plain, thinking, type } = log;
@@ -38,8 +31,8 @@ function FlowMessage({ log, searchValue = '' }: FlowMessageProps) {
         }
 
         return {
-            hasResultMatch: containsSearchValue(result, trimmedSearch),
-            hasThinkingMatch: containsSearchValue(thinking, trimmedSearch),
+            hasResultMatch: matchesSearchTerm(result, trimmedSearch),
+            hasThinkingMatch: matchesSearchTerm(thinking, trimmedSearch),
         };
     }, [searchValue, thinking, result]);
 
@@ -158,7 +151,6 @@ function FlowMessage({ log, searchValue = '' }: FlowMessageProps) {
                     resultFormat === ResultFormat.Terminal && isDetailsVisible ? 'w-full' : '',
                 )}
             >
-                {/* Thinking toggle button */}
                 {shouldShowThinkingToggle && (
                     <div className="text-muted-foreground mb-2 text-xs">
                         <div
@@ -170,10 +162,8 @@ function FlowMessage({ log, searchValue = '' }: FlowMessageProps) {
                     </div>
                 )}
 
-                {/* Thinking content */}
                 {renderThinkingContent()}
 
-                {/* Main message content */}
                 {message && (
                     <Markdown
                         className="prose-xs prose-fixed wrap-break-word"
@@ -183,7 +173,6 @@ function FlowMessage({ log, searchValue = '' }: FlowMessageProps) {
                     </Markdown>
                 )}
 
-                {/* Result details */}
                 {result && (
                     <div className="text-muted-foreground mt-2 text-xs">
                         <div
@@ -212,7 +201,12 @@ function FlowMessage({ log, searchValue = '' }: FlowMessageProps) {
                     <TooltipContent>Copy</TooltipContent>
                 </Tooltip>
                 <span className="text-muted-foreground/50">{formatDate(new Date(createdAt))}</span>
-                <span className="text-muted-foreground/50">{log.id}</span>
+                <span
+                    className="text-muted-foreground/50"
+                    data-slot="flow-message-id"
+                >
+                    {log.id}
+                </span>
             </div>
         </div>
     );

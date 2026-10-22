@@ -305,6 +305,97 @@ Use arrow keys, page up/down, or home/end keys to navigate through the document.
 	EULAProgressComplete      = " • Complete"
 )
 
+// Update Overview Screen constants
+const (
+	UpdateOverviewFormName        = "Update PentAGI"
+	UpdateOverviewFormDescription = "What this update changes, and the release notes behind it"
+	UpdateOverviewFormOverview    = `Review what the update will change before applying it.
+
+The overview shows:
+• Each stack with the version it is on and the version it moves to
+• Every component and whether it will actually change
+• The changelog and release notes of every release you cross
+
+Nothing is downloaded or changed on this screen. Continue to apply the update.
+
+Use arrow keys, page up/down, or home/end keys to navigate through the document.`
+
+	UpdateOverviewLoading         = "Preparing update overview..."
+	UpdateOverviewConfigurationOK = "✓ Update available"
+	UpdateOverviewConfigurationNo = "✓ Everything up to date"
+
+	// Document
+	UpdateOverviewHeading         = "# Update overview"
+	UpdateOverviewNothingToDo     = "Everything is up to date. There is nothing to apply."
+	UpdateOverviewCheckFailed     = "The last update check did not complete, so there is nothing to show here.\n\nApplying the update will pull whatever the compose files currently point at."
+	UpdateOverviewStackHeading    = "## %s"
+	UpdateOverviewVersionMove     = "**%s → %s**"
+	UpdateOverviewVersionTarget   = "**→ %s**"
+	UpdateOverviewVersionUnknown  = "*Version unknown — this installation could not be matched to a release.*"
+	UpdateOverviewVersionMixed    = "*Components come from different releases, so the version above is the oldest of them.*"
+	UpdateOverviewComponentsTitle = "Components:"
+	UpdateOverviewComponentChange = "- **%s** (%s/%s) — %s"
+	UpdateOverviewWillChange      = "will be updated"
+	UpdateOverviewNoChange        = "unchanged"
+	UpdateOverviewCannotVerify    = "cannot verify — nothing to compare against"
+	UpdateOverviewReleaseHeading  = "### %s"
+	UpdateOverviewReleasePreview  = "### %s (preview)"
+	UpdateOverviewReleaseDate     = "*Released %s*"
+	UpdateOverviewReleasesCut     = "*Older releases omitted — showing the most recent %d.*"
+	UpdateOverviewUpToDateTitle   = "## Already up to date"
+	UpdateOverviewRenderFallback  = "%s\n\n---\n\n*Note: Markdown rendering failed: %v*"
+)
+
+// Installer Update Screen constants.
+//
+// The wording is deliberate and was wrong before: the screen this replaced promised to
+// "replace the current installer" and "exit for manual restart", and no version of this
+// installer has ever done either. What happens is a download of one verified file.
+const (
+	InstallerUpdateFormOverview = `Download the installer build the update server offers for this machine.
+
+The file is written next to your installation under its own versioned name, so the installer you are running now is left untouched. Its length, sha256 and signature are checked as it arrives; anything that fails is deleted rather than kept.
+
+Replacing the installer you use is your decision to make afterwards — run the downloaded file when you are ready.`
+
+	InstallerUpdateHelpTitle       = "Update Installer"
+	InstallerUpdateConfigurationOK = "✓ Newer build available"
+	InstallerUpdateConfigurationNo = "✓ Installer up to date"
+
+	// Left panel: what is on offer, before anything is fetched.
+	InstallerUpdateAsking         = "Asking the update server about the build on offer..."
+	InstallerUpdateLoadFailed     = "Could not get the package description: %v"
+	InstallerUpdateCurrentVersion = "• Running version: %s"
+	InstallerUpdateOfferedVersion = "• Offered version: %s"
+	InstallerUpdatePlatform       = "• Platform: %s/%s"
+	InstallerUpdateSize           = "• Download size: %s"
+	InstallerUpdateTarget         = "• Will be saved as: %s"
+	InstallerUpdateManualNote     = "The installer you are running is not replaced. You move the downloaded file into place yourself, with the command shown when the download finishes."
+	InstallerUpdateSameVersion    = "The offered build is the one already running. Downloading it changes nothing."
+	InstallerUpdatePressEnter     = "Press Enter to download"
+
+	// The only thing worth a confirmation: a file under that exact name is already here,
+	// and it may be one somebody put there on purpose. Downloading over nothing needs no
+	// permission and is not asked about.
+	InstallerUpdateAlreadyHere     = "A file of this name is already here — a previous download, or one interrupted partway."
+	InstallerUpdateOverwritePrompt = "Download again and replace %s?"
+	InstallerUpdatePressYN         = "Press y to download and replace it, n to keep the file already on disk"
+	InstallerUpdateKeptExisting    = "Kept the file already on disk. Nothing was downloaded."
+
+	// Left panel: the download itself. There is no "completed" here — the operation
+	// reports where the file landed and that it verified, and a second line saying the
+	// same thing reads as a second thing having happened.
+	InstallerUpdateInProgress = "Downloading the installer build...\n"
+	InstallerUpdateFailed     = "Failed to download the installer build"
+
+	// What to do with the file afterwards. The installer never does this itself.
+	InstallerUpdateFileIsAt    = "The build is at %s"
+	InstallerUpdateMoveTitle   = "To start using it, run:"
+	InstallerUpdateMoveUnknown = "Move it over the installer you launched when you are ready — this installer does not replace itself."
+	InstallerUpdateWindowsNote = "Windows will not replace a program that is running: close this installer before running the command."
+	InstallerUpdateMoveIndent  = "    %s"
+)
+
 // Main Menu Screen constants
 const (
 	MainMenuTitle       = "PentAGI Configuration"
@@ -366,6 +457,9 @@ const (
 	LLMProviderGLM           = "GLM Zhipu AI"
 	LLMProviderKimi          = "Kimi Moonshot AI"
 	LLMProviderQwen          = "Qwen Alibaba Cloud"
+	LLMProviderMiniMax       = "MiniMax"
+	LLMProviderMistral       = "Mistral AI"
+	LLMProviderXAI           = "xAI Grok"
 	LLMProviderCustom        = "Custom"
 	LLMProviderOpenAIDesc    = "Industry-leading GPT models with excellent general performance"
 	LLMProviderAnthropicDesc = "Claude models with superior reasoning and safety features"
@@ -376,6 +470,9 @@ const (
 	LLMProviderGLMDesc       = "Zhipu AI's GLM models for Chinese and English tasks"
 	LLMProviderKimiDesc      = "Moonshot AI's long-context models for document analysis"
 	LLMProviderQwenDesc      = "Alibaba Cloud's Qwen models for multilingual tasks"
+	LLMProviderMiniMaxDesc   = "MiniMax's M-series models for agentic reasoning and long-context tasks"
+	LLMProviderMistralDesc   = "Mistral AI's Medium, Small and Ministral models through the Mistral chat API"
+	LLMProviderXAIDesc       = "xAI's Grok models through the xAI chat API"
 	LLMProviderCustomDesc    = "Custom OpenAI-compatible endpoint for maximum flexibility"
 )
 
@@ -417,13 +514,19 @@ Cost: Mid-range pricing with excellent value for reasoning-heavy security workfl
 
 Setup: Get your API key from https://console.anthropic.com/`
 
+	LLMFormAnthropicFederatedHelp = `Federated (Enterprise) authentication uses a workload identity token instead of a static API key.
+
+PentAGI presents a short-lived identity token (inline via the Identity Token field, or read at runtime from the Identity Token File) together with the Organization, Workspace, Service Account and Federation Rule that map it to Anthropic access.
+
+Use this when your organization issues federated credentials (for example from a cloud workload identity provider) rather than a long-lived API key. All four IDs plus one of the two token fields are required for federated auth to be considered configured.
+
+Switch back to "API Key" for the standard console API key.`
+
 	LLMFormGeminiHelp = `Google Gemini combines multimodal capabilities with advanced reasoning, perfect for comprehensive security assessments.
 
 Default PentAGI Models:
-• Gemini 2.5 Pro: Advanced reasoning model for deep vulnerability analysis and complex exploit development
-• Gemini 2.5 Flash: High-performance model balancing speed and intelligence for most security testing tasks
-• Gemini 2.0 Flash Lite: Cost-effective model for rapid scanning and information gathering operations
-• Reasoning capabilities with step-by-step analysis for thorough penetration testing
+• gemini-3.5-flash-lite: planning, the primary agent loop, code, and other tool-using agents
+• gemini-3.1-flash-lite: simple output, JSON, reflection, search and enrichment
 
 Key Advantages:
 • Multimodal support enables analysis of screenshots, network diagrams, and security documentation
@@ -495,7 +598,7 @@ Setup options: Local installation from https://10.10.10.10:11434 or cloud regist
 	LLMFormDeepSeekHelp = `DeepSeek provides advanced AI models with strong reasoning capabilities and multilingual support.
 
 Default PentAGI Models:
-• deepseek-v4-flash: Cost-efficient general-purpose model for dialogue, code generation, and tool calling
+• deepseek-flash: Cost-efficient general-purpose model for dialogue, code generation, and tool calling
 • deepseek-v4-pro: Higher-tier reasoning model for complex logic, mathematical reasoning, and security analysis
 • Cost-effective pricing with competitive performance compared to leading models
 
@@ -507,7 +610,7 @@ Key Advantages:
 
 LiteLLM Integration:
 • Set Provider Name to 'deepseek' when using LiteLLM proxy
-• Enables model prefix (e.g., deepseek/deepseek-v4-flash) without modifying config.yml
+• Enables model prefix (e.g., deepseek/deepseek-flash) without modifying config.yml
 • Optional for direct DeepSeek API usage
 
 Best for: Teams requiring multilingual support, cost-conscious deployments, Chinese language security testing
@@ -562,7 +665,7 @@ Alternative API Endpoints:
 
 LiteLLM Integration:
 • Set Provider Name to 'moonshot' when using LiteLLM proxy
-• Enables model prefix (e.g., moonshot/kimi-k2.5) without modifying config.yml
+• Enables model prefix (e.g., moonshot/kimi-k2.6) without modifying config.yml
 • Optional for direct Kimi API usage
 
 Best for: Large codebase analysis, document-heavy assessments, teams needing extended context for security research
@@ -599,6 +702,64 @@ Best for: Teams operating in Asian markets, multilingual security testing, visua
 Cost: Competitive pricing with flexible tiers for different use cases
 
 Setup: Get your API key from https://dashscope.console.aliyun.com/`
+
+	LLMFormMiniMaxHelp = `MiniMax provides the M-series of agentic models with very large context windows, accessible through an OpenAI-compatible API.
+
+Default PentAGI Models:
+• MiniMax-M3: Latest flagship model (~1M token context) for agentic reasoning, tool use, coding, and long-context tasks
+• MiniMax-M2.7: Previous-generation model with strong reasoning and coding capabilities
+• MiniMax-M2.7-highspeed: Low-latency variant of M2.7 for fast response scenarios
+
+Key Advantages:
+• Very large context window on M3 (~1M tokens) for long codebases and reports
+• Strong agentic tool-calling, JSON output, and streaming support
+• OpenAI- and Anthropic-compatible endpoints for drop-in integration
+
+API Endpoint:
+• Global: https://api.minimax.io/v1 (default)
+
+LiteLLM Integration:
+• Set Provider Name to 'minimax' when using a LiteLLM proxy
+• Enables model prefix (e.g., minimax/MiniMax-M3) without modifying config.yml
+• Optional for direct MiniMax API usage
+
+Best for: Agentic security workflows that benefit from very large context and reliable tool calling
+Cost: Competitive per-token pricing across the M-series
+
+Setup: Get your API key from https://platform.minimax.io/`
+
+	LLMFormMistralHelp = `Mistral AI serves its models through an OpenAI-compatible chat API.
+
+Default PentAGI Models:
+• mistral-medium-latest: planning and advice
+• mistral-large-latest: primary and execution agents
+• mistral-small-latest: utility and read-heavy agents
+
+API Endpoint:
+• https://api.mistral.ai/v1 (default)
+
+LiteLLM Integration:
+• Set Provider Name to 'mistral' when using a LiteLLM proxy
+• Enables model prefix (e.g., mistral/mistral-small-latest) without modifying config.yml
+• Optional for direct Mistral API usage
+
+Setup: Get your API key from https://console.mistral.ai/`
+
+	LLMFormXAIHelp = `xAI serves its Grok models through an OpenAI-compatible chat API.
+
+Default PentAGI Models:
+• grok-4.3: planning, the primary agent loop, code, and other tool-using agents
+• grok-4.20-0309-non-reasoning: simple output, JSON, reflection, and enrichment
+
+API Endpoint:
+• https://api.x.ai/v1 (default)
+
+LiteLLM Integration:
+• Set Provider Name to 'xai' when using a LiteLLM proxy
+• Enables model prefix (e.g., xai/grok-4.3) without modifying config.yml
+• Optional for direct xAI API usage
+
+Setup: Get your API key from https://console.x.ai/`
 
 	LLMFormCustomHelp = `Configure any OpenAI-compatible API endpoint for maximum flexibility and integration with existing infrastructure.
 
@@ -639,7 +800,8 @@ const (
 	LLMFormFieldRegion            = "Region"
 	LLMFormFieldModel             = "Model"
 	LLMFormFieldConfigPath        = "Config Path"
-	LLMFormFieldLegacyReasoning   = "Legacy Reasoning"
+	LLMFormFieldAPIType           = "API Type"
+	LLMFormFieldAPIVersion        = "API Version"
 	LLMFormFieldPreserveReasoning = "Preserve Reasoning"
 	LLMFormFieldProviderName      = "Provider Name"
 	LLMFormFieldPullTimeout       = "Model Pull Timeout"
@@ -654,14 +816,33 @@ const (
 	LLMFormSessionTokenDesc       = "AWS Session Token for temporary credentials (optional, used with static credentials)"
 	LLMFormRegionDesc             = "AWS region for Bedrock service"
 	LLMFormModelDesc              = "Default model to use for this provider"
-	LLMFormConfigPathDesc         = "Path to configuration file (optional)"
-	LLMFormLegacyReasoningDesc    = "Enable legacy reasoning mode (true/false)"
+	LLMFormConfigPathDesc         = "Config file on this host, or a config inside the container from the suggestions (optional)"
+	LLMFormAPITypeDesc            = "Address convention: azure or azure_ad for an Azure OpenAI deployment, empty for a plain OpenAI-compatible endpoint"
+	LLMFormAPIVersionDesc         = "api-version an Azure deployment requires; ignored by a plain endpoint"
 	LLMFormPreserveReasoningDesc  = "Preserve reasoning content in multi-turn conversations (required by some providers)"
 	LLMFormProviderNameDesc       = "Provider name prefix for model names (useful for LiteLLM proxy)"
 	LLMFormPullTimeoutDesc        = "Timeout in seconds for downloading models (default: 600)"
 	LLMFormPullEnabledDesc        = "Automatically download required models on startup"
 	LLMFormLoadModelsEnabledDesc  = "Load available models list from Ollama server"
 	LLMFormOllamaAPIKeyDesc       = "Ollama Cloud API key (optional, leave empty for local Ollama server)"
+
+	// Anthropic authentication mode (API key vs federated / enterprise)
+	LLMAnthropicAuthModeTitle       = "Authentication"
+	LLMAnthropicAuthModeDesc        = "Choose how PentAGI authenticates to Anthropic"
+	LLMAnthropicAuthModeAPIKey      = "API Key"
+	LLMAnthropicAuthModeFederated   = "Federated (Enterprise)"
+	LLMFormFieldAnthropicOrgID      = "Organization ID"
+	LLMFormAnthropicOrgIDDesc       = "Anthropic organization the requests belong to"
+	LLMFormFieldAnthropicWorkspace  = "Workspace ID"
+	LLMFormAnthropicWorkspaceDesc   = "Anthropic workspace to scope usage and limits to"
+	LLMFormFieldAnthropicServiceAcc = "Service Account ID"
+	LLMFormAnthropicServiceAccDesc  = "Service account the federated identity authenticates as"
+	LLMFormFieldAnthropicIDToken    = "Identity Token"
+	LLMFormAnthropicIDTokenDesc     = "Federated identity token (use this or the token file, not both)"
+	LLMFormFieldAnthropicIDTokenF   = "Identity Token File"
+	LLMFormAnthropicIDTokenFDesc    = "Path to a file holding the federated identity token, read at runtime"
+	LLMFormFieldAnthropicFedRule    = "Federation Rule ID"
+	LLMFormAnthropicFedRuleDesc     = "Federation rule that maps the identity token to Anthropic access"
 )
 
 // LLM Provider Form status messages
@@ -811,9 +992,10 @@ Graphiti provides temporal knowledge graph capabilities:
 • Entity and relationship extraction
 • Semantic memory for AI agents
 • Temporal context tracking
-• Knowledge reuse across flows
+• Flow-scoped contextual search
 
-⚠️  REQUIREMENT: Graphiti requires configured OpenAI provider (LLM Providers → OpenAI) for entity extraction.
+Graphiti reuses credentials configured in the LLM Providers and Embeddings screens. LiteLLM credentials remain in .env. Select the provider preset here; configure its models in ./graphiti/<provider>.yaml.
+Supports openai, gemini, litellm, custom.
 
 Choose between embedded instance or external connection.`
 
@@ -823,20 +1005,50 @@ Choose between embedded instance or external connection.`
 	MonitoringGraphitiDisabled = "Disabled"
 
 	// Form fields
-	MonitoringGraphitiDeploymentType     = "Deployment Type"
-	MonitoringGraphitiDeploymentTypeDesc = "Select the deployment type for Graphiti"
-	MonitoringGraphitiURL                = "Graphiti Server URL"
-	MonitoringGraphitiURLDesc            = "Address of the Graphiti API server"
-	MonitoringGraphitiTimeout            = "Request Timeout"
-	MonitoringGraphitiTimeoutDesc        = "Timeout in seconds for Graphiti operations"
-	MonitoringGraphitiModelName          = "Extraction Model"
-	MonitoringGraphitiModelNameDesc      = "LLM model for entity extraction (uses OpenAI provider from LLM Providers configuration)"
-	MonitoringGraphitiNeo4jUser          = "Neo4j Username"
-	MonitoringGraphitiNeo4jUserDesc      = "Username for Neo4j database access"
-	MonitoringGraphitiNeo4jPassword      = "Neo4j Password"
-	MonitoringGraphitiNeo4jPasswordDesc  = "Password for Neo4j database access"
-	MonitoringGraphitiNeo4jDatabase      = "Neo4j Database"
-	MonitoringGraphitiNeo4jDatabaseDesc  = "Neo4j database name"
+	MonitoringGraphitiDeploymentType           = "Deployment Type"
+	MonitoringGraphitiDeploymentTypeDesc       = "Select the deployment type for Graphiti"
+	MonitoringGraphitiURL                      = "Graphiti Server URL"
+	MonitoringGraphitiURLDesc                  = "Address of the Graphiti API server"
+	MonitoringGraphitiTimeout                  = "Request Timeout"
+	MonitoringGraphitiTimeoutDesc              = "Timeout in seconds for Graphiti operations"
+	MonitoringGraphitiLLMClientType            = "LLM Provider Preset"
+	MonitoringGraphitiLLMClientTypeDesc        = "Provider preset; credentials come from LLM Providers (openai, gemini, litellm, custom) and models from ./graphiti/<provider>.yaml"
+	MonitoringGraphitiSeparateEmbedding        = "Use Separate Embedding Endpoint"
+	MonitoringGraphitiSeparateEmbeddingDesc    = "Use the shared Embeddings configuration instead of the selected LLM credentials"
+	MonitoringGraphitiSemaphoreLimit           = "Coroutine Limit"
+	MonitoringGraphitiSemaphoreLimitDesc       = "Maximum concurrent Graphiti helper coroutines"
+	MonitoringGraphitiLogLevel                 = "Log Level"
+	MonitoringGraphitiLogLevelDesc             = "Graphiti log verbosity"
+	MonitoringGraphitiSearchScope              = "Search Scope"
+	MonitoringGraphitiSearchScopeDesc          = "Use flowid for isolation or all for trusted global-search testing"
+	MonitoringGraphitiIngestPolicyRules        = "Ingest Policy Rules"
+	MonitoringGraphitiIngestPolicyRulesDesc    = "JSON mapping of message patterns to REJECT, SKIP_LLM, or PROCESS"
+	MonitoringGraphitiIngestPolicyField        = "Ingest Policy Match Field"
+	MonitoringGraphitiIngestPolicyFieldDesc    = "Message field used for policy matching"
+	MonitoringGraphitiIngestDefaultAction      = "Default Ingest Action"
+	MonitoringGraphitiIngestDefaultActionDesc  = "Action applied when no ingest policy rule matches"
+	MonitoringGraphitiIngestWorkerCount        = "Ingest Worker Count"
+	MonitoringGraphitiIngestWorkerCountDesc    = "Maximum concurrent heavy ingest jobs across flows"
+	MonitoringGraphitiIngestQueueMaxSize       = "Ingest Queue Limit"
+	MonitoringGraphitiIngestQueueMaxSizeDesc   = "Maximum queued messages; 0 keeps the queue unlimited"
+	MonitoringGraphitiTaxonomyLayerProfile     = "Taxonomy Layer Profile"
+	MonitoringGraphitiTaxonomyLayerProfileDesc = "Enabled relationship classes or the full/minimal alias"
+	MonitoringGraphitiCPUs                     = "Graphiti CPU Limit"
+	MonitoringGraphitiCPUsDesc                 = "CPU limit for the Graphiti container"
+	MonitoringGraphitiMemory                   = "Graphiti Memory Limit"
+	MonitoringGraphitiMemoryDesc               = "Memory limit for the Graphiti container"
+	MonitoringGraphitiNeo4jUser                = "Neo4j Username"
+	MonitoringGraphitiNeo4jUserDesc            = "Username for Neo4j database access"
+	MonitoringGraphitiNeo4jPassword            = "Neo4j Password"
+	MonitoringGraphitiNeo4jPasswordDesc        = "Password for Neo4j database access"
+	MonitoringGraphitiNeo4jDatabase            = "Neo4j Database"
+	MonitoringGraphitiNeo4jDatabaseDesc        = "Neo4j database name"
+	MonitoringGraphitiNeo4jCPUs                = "Neo4j CPU Limit"
+	MonitoringGraphitiNeo4jCPUsDesc            = "CPU limit for the Neo4j container"
+	MonitoringGraphitiNeo4jMemory              = "Neo4j Memory Limit"
+	MonitoringGraphitiNeo4jMemoryDesc          = "Memory limit for the Neo4j container"
+	MonitoringGraphitiNeo4jShmSize             = "Neo4j Shared Memory Limit"
+	MonitoringGraphitiNeo4jShmSizeDesc         = "/dev/shm limit; actual usage counts toward Neo4j memory"
 
 	// Help text
 	MonitoringGraphitiModeGuide    = "Choose deployment: Embedded (local Neo4j), External (existing Graphiti), Disabled (no knowledge graph)"
@@ -850,15 +1062,19 @@ Embedded deploys complete Graphiti stack:
 • Private knowledge graph on your server
 
 Prerequisites:
-• OpenAI provider must be configured (LLM Providers → OpenAI)
-• OpenAI API key is used for entity extraction
-• Configured model will be used for knowledge graph operations
+• Configure provider credentials in LLM Providers (or .env for LiteLLM)
+• Configure shared embeddings before enabling separate embeddings
+• Edit models and call parameters in ./graphiti/<provider>.yaml
 
 Resource requirements:
-• ~1.5GB RAM, 3GB disk space minimum
+• Defaults reserve up to 2GB for Graphiti and 4GB for Neo4j
 • Neo4j UI: http://localhost:7474
 • Graphiti API: http://localhost:8000
 • Automatic setup and maintenance
+
+Keep flowid search scope for isolation. Use a bounded ingest queue on memory-constrained hosts. Semaphore/workers control throughput; Graphiti and Neo4j CPU/memory limits must grow with concurrent flows.
+
+Fine tuning for retries, combined extraction, anchors, telemetry, and diagnostics remains available in .env.
 
 Best for: Teams wanting knowledge graph capabilities with full data control and privacy.`
 	MonitoringGraphitiExternalHelp = `⚠️  BETA: This feature is under active development. Monitor updates for improvements.
@@ -873,8 +1089,7 @@ External connects to your existing Graphiti server:
 Setup requirements:
 • Graphiti server URL and access
 • Network connectivity required
-• External server must be configured with OpenAI API key
-• Model and extraction settings configured on external server
+• Provider, model, embedding, extraction, and graph settings are configured on the external server
 
 Best for: Teams using existing Graphiti deployments or cloud services.`
 	MonitoringGraphitiDisabledHelp = `Graphiti is disabled. You will not have:
@@ -882,13 +1097,10 @@ Best for: Teams using existing Graphiti deployments or cloud services.`
 • Temporal knowledge graph
 • Entity and relationship extraction
 • Semantic memory for AI agents
-• Knowledge reuse across flows
+• Flow-scoped graph recall
 • Advanced contextual search
 
-Note: Graphiti is currently in beta.
-Consider enabling for production use
-to build a knowledge base from
-penetration testing results.`
+PentAGI continues using its primary vector memory when Graphiti is disabled.`
 )
 
 // Observability Integration constants
@@ -1182,6 +1394,64 @@ const (
 	ServerSettingsLicenseKey     = "License Key"
 	ServerSettingsLicenseKeyDesc = "PentAGI License Key in format of XXXX-XXXX-XXXX-XXXX"
 
+	ServerSettingsUpdateStrategy = "Update Strategy"
+	// The three values are spelled out because the field is free text: the
+	// validator refuses anything else on save, and a user who has to guess the
+	// vocabulary will find that out the hard way.
+	ServerSettingsUpdateStrategyDesc = "Which builds updates come from: preview (default, follows " +
+		"the channels you already use), stable (published releases only) or nightly (newest build, " +
+		"released or not)"
+
+	ServerSettingsUpdateServerHost     = "Update Server Host"
+	ServerSettingsUpdateServerHostDesc = "PentAGI Cloud API endpoint as host[:port]; leave empty for update.pentagi.com"
+
+	ServerSettingsSupportServerHost     = "Support Server Host"
+	ServerSettingsSupportServerHostDesc = "PentAGI Support API endpoint as host[:port]; leave empty for support.pentagi.com"
+
+	ToolsDockerInsideHost     = "Worker Docker Daemon Host"
+	ToolsDockerInsideHostDesc = "Daemon endpoint given to worker containers (e.g., tcp://dind:2376); empty keeps socket mounting"
+
+	ToolsDockerInsideTLSVerify     = "Worker Docker TLS Verify"
+	ToolsDockerInsideTLSVerifyDesc = "Enable TLS verification for the worker container's Docker connection"
+
+	ToolsDockerInsideCertPath     = "Worker Docker Certificate Path"
+	ToolsDockerInsideCertPathDesc = "TLS certificate directory on the WORKER NODE, mounted read-only into worker containers"
+
+	ToolsDockerInsideHostHelp = `Docker daemon endpoint handed to worker containers when Docker Access is enabled.
+
+It is injected into each sandbox as DOCKER_HOST, so the Docker CLI inside the container talks to this daemon.
+
+Setting it also STOPS the host socket from being auto-detected and bind-mounted into sandboxes: an agent then reaches only the daemon you designated, not the one running PentAGI itself. An explicitly configured Docker Socket still takes precedence and is mounted as before.
+
+Leave empty to keep the historical behaviour (auto-detected socket mount).
+
+Examples:
+• tcp://dind:2376
+• tcp://10.0.0.5:2375
+• unix:///var/run/docker.sock`
+
+	ToolsDockerInsideTLSVerifyHelp = `Enables TLS verification for the worker container's connection to the Docker daemon.
+
+Injected into each sandbox as DOCKER_TLS_VERIFY. Use it together with Worker Docker Daemon Host and Worker Docker Certificate Path when the daemon requires mutual TLS.
+
+Leave disabled for a plain (non-TLS) endpoint.`
+
+	ToolsDockerInsideCertPathHelp = `Directory holding the TLS client material (ca.pem, cert.pem, key.pem) used by worker containers.
+
+Injected into each sandbox as DOCKER_CERT_PATH and bind-mounted read-only at the SAME path, so the value resolves identically inside the container.
+
+IMPORTANT: this path is resolved on the WORKER NODE — the machine whose Docker daemon creates sandbox containers — not on the machine running this installer. It is therefore not validated here; make sure it exists on the worker node.
+
+Examples:
+• /etc/docker/certs
+• /opt/pentagi/docker/ssl`
+
+	ServerSettingsTenantID     = "Tenant ID"
+	ServerSettingsTenantIDDesc = "Optional namespace for multi-instance deployment on one host (e.g., acme, team_alpha)"
+
+	ServerSettingsPprofAddr     = "pprof Listen Address"
+	ServerSettingsPprofAddrDesc = "Optional Go pprof bind address; leave empty to disable (e.g., :7777, 127.0.0.1:7778)"
+
 	ServerSettingsHost     = "Server Host (Listen IP)"
 	ServerSettingsHostDesc = "Bind address used by Docker port mapping (e.g., 0.0.0.0 to expose on all interfaces)"
 
@@ -1194,8 +1464,11 @@ const (
 	ServerSettingsCORSOrigins     = "CORS Origins"
 	ServerSettingsCORSOriginsDesc = "Comma-separated list of allowed origins (e.g., https://localhost:8443,https://localhost)"
 
+	ServerSettingsTrustedProxies     = "Trusted Proxies"
+	ServerSettingsTrustedProxiesDesc = "Comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted (empty: trust none)"
+
 	ServerSettingsProxyURL     = "HTTP/HTTPS Proxy"
-	ServerSettingsProxyURLDesc = "Proxy for outbound requests to LLMs and external tools (not used for Docker API access)"
+	ServerSettingsProxyURLDesc = "Proxy for backend LLM, embedding and search requests (not for sandboxes, scraper, Graphiti)"
 
 	ServerSettingsProxyUsername     = "Proxy Username"
 	ServerSettingsProxyUsernameDesc = "Username for proxy authentication (optional)"
@@ -1222,21 +1495,31 @@ const (
 	ServerSettingsCookieSigningSalt     = "Cookie Signing Salt"
 	ServerSettingsCookieSigningSaltDesc = "Secret used to sign cookies (keep private)"
 
+	ServerSettingsDatabaseExtensionsSchema     = "Database Extensions Schema"
+	ServerSettingsDatabaseExtensionsSchemaDesc = "Schema holding shared extensions when Tenant ID is set (e.g., public, extensions for Supabase)"
+
+	ServerSettingsDatabaseSearchPathViaOptions     = "Search Path via Options"
+	ServerSettingsDatabaseSearchPathViaOptionsDesc = "Send the tenant search_path inside the options startup parameter (needed by some poolers)"
+
 	// Hints for fields overview
-	ServerSettingsLicenseKeyHint          = "License Key"
-	ServerSettingsHostHint                = "Listen IP"
-	ServerSettingsPortHint                = "Listen Port"
-	ServerSettingsPublicURLHint           = "Public URL"
-	ServerSettingsCORSOriginsHint         = "CORS Origins"
-	ServerSettingsProxyURLHint            = "Proxy URL"
-	ServerSettingsProxyUsernameHint       = "Proxy Username"
-	ServerSettingsProxyPasswordHint       = "Proxy Password"
-	ServerSettingsHTTPClientTimeoutHint   = "HTTP Timeout"
-	ServerSettingsTerminalToolTimeoutHint = "Terminal Timeout"
-	ServerSettingsExternalSSLCAPathHint   = "Custom CA Path"
-	ServerSettingsExternalSSLInsecureHint = "Skip SSL Verification"
-	ServerSettingsSSLDirHint              = "SSL Directory"
-	ServerSettingsDataDirHint             = "Data Directory"
+	ServerSettingsLicenseKeyHint                   = "License Key"
+	ServerSettingsTenantIDHint                     = "Tenant ID"
+	ServerSettingsPprofAddrHint                    = "pprof Address"
+	ServerSettingsHostHint                         = "Listen IP"
+	ServerSettingsPortHint                         = "Listen Port"
+	ServerSettingsPublicURLHint                    = "Public URL"
+	ServerSettingsCORSOriginsHint                  = "CORS Origins"
+	ServerSettingsProxyURLHint                     = "Proxy URL"
+	ServerSettingsProxyUsernameHint                = "Proxy Username"
+	ServerSettingsProxyPasswordHint                = "Proxy Password"
+	ServerSettingsHTTPClientTimeoutHint            = "HTTP Timeout"
+	ServerSettingsTerminalToolTimeoutHint          = "Terminal Timeout"
+	ServerSettingsExternalSSLCAPathHint            = "Custom CA Path"
+	ServerSettingsExternalSSLInsecureHint          = "Skip SSL Verification"
+	ServerSettingsSSLDirHint                       = "SSL Directory"
+	ServerSettingsDataDirHint                      = "Data Directory"
+	ServerSettingsDatabaseExtensionsSchemaHint     = "Extensions Schema"
+	ServerSettingsDatabaseSearchPathViaOptionsHint = "Search Path via Options"
 
 	// Help texts per-field
 	ServerSettingsGeneralHelp = `PentAGI exposes its web UI via Docker with configurable host and port.
@@ -1246,6 +1529,26 @@ Public URL must reflect how users reach the server. If using a subpath (e.g., /p
 SSL directory allows providing custom certificates. When set, server will use server.crt and server.key from that directory. Data directory stores artifacts and working files for flows.`
 
 	ServerSettingsLicenseKeyHelp = `PentAGI License Key in format of XXXX-XXXX-XXXX-XXXX. It's used to communicate with PentAGI Cloud API.`
+
+	ServerSettingsTenantIDHelp = `Optional identifier that namespaces PostgreSQL schema, data directory, Docker objects, Graphiti group ids, auth cookies and telemetry when several PentAGI instances share one host and the same backing services.
+
+Leave empty for a single-instance deployment (default). When set, the value must match ^[a-z][a-z0-9_]{0,31}$ — lowercase letter first, then lowercase letters, digits or underscores, max 32 characters. Hyphens are not allowed.
+
+Examples:
+• acme
+• team_alpha
+• staging01`
+
+	ServerSettingsPprofAddrHelp = `Optional listen address for the Go pprof HTTP endpoint used for CPU/memory profiling.
+
+Leave empty to keep pprof disabled (default, recommended for production). When set, the value must be a host:port pair such as :7777 or 127.0.0.1:7778.
+
+Instances that share a host network namespace need distinct addresses — a port is not a string namespace and cannot be derived from TENANT_ID.
+
+Examples:
+• :7777
+• 127.0.0.1:7778
+• 0.0.0.0:7780`
 
 	ServerSettingsHostHelp = `Bind address for published port in docker-compose mapping.
 
@@ -1264,7 +1567,11 @@ Examples:
 
 	ServerSettingsCORSOriginsHelp = `Comma-separated allowed origins for browser access.`
 
-	ServerSettingsProxyURLHelp = `HTTP or HTTPS proxy for outbound requests to LLM providers and external tools. Not used for Docker API communication.`
+	ServerSettingsTrustedProxiesHelp = `Comma-separated list of proxy IP addresses or CIDR ranges whose X-Forwarded-For / X-Real-IP headers PentAGI will trust when determining a client's real IP.
+
+Set this only when PentAGI sits behind a reverse proxy or load balancer you control. Leave empty to trust none. Example: 10.0.0.0/8,172.16.0.0/12`
+
+	ServerSettingsProxyURLHelp = `HTTP or HTTPS proxy for every backend request to LLM, embedding and search providers, local endpoints included, and for update checks; the installer's own update and download calls use it too. Sandbox containers, the scraper, Graphiti and Docker API communication do not use it.`
 
 	ServerSettingsHTTPClientTimeoutHelp = `Timeout in seconds for all external HTTP/HTTPS API calls including:
 • LLM provider requests (OpenAI, Anthropic, Bedrock, etc.)
@@ -1306,6 +1613,20 @@ When enabled, all certificate validation is bypassed, making connections vulnera
 	ServerSettingsDataDirHelp = `Host directory for persistent data. PentAGI stores agent artifacts under flow-N subdirectories, which map to /work inside worker containers.`
 
 	ServerSettingsCookieSigningSaltHelp = `Secret salt used to sign cookies. Keep it private.`
+
+	ServerSettingsDatabaseExtensionsSchemaHelp = `PostgreSQL schema that holds the shared extensions (vector, pg_trgm) every tenant must reach through its search_path.
+
+Only used when Tenant ID is set; leave empty for the default "public", which is where a stock PostgreSQL install keeps them. Set it when your database follows another convention — Supabase installs its extensions into "extensions", and startup aborts with a message naming the schema it found if this does not match.
+
+Examples:
+• public
+• extensions`
+
+	ServerSettingsDatabaseSearchPathViaOptionsHelp = `Sends the tenant search_path as options=--search_path=<value> instead of a bare search_path connection parameter.
+
+Only used when Tenant ID is set. Keep it false for a direct PostgreSQL connection. Enable it when connecting through a pooler that forwards the "options" startup parameter but drops an unrecognized bare search_path — reported to be the case for some versions of Supabase's Supavisor. It is not guaranteed to work: startup fails with a clear schema-mismatch error if the value never reaches the backend.
+
+Values: true, false`
 )
 
 // Human-in-the-loop screen strings
@@ -1351,6 +1672,8 @@ Task Planning (⚠️  BETA):
 	ToolsAIAgentsSettingMaxLimitedToolCallsDesc = "Maximum tool calls for Searcher, Enricher, Memorist, etc."
 	ToolsAIAgentsSettingTaskPlanning            = "Enable Task Planning (beta)"
 	ToolsAIAgentsSettingTaskPlanningDesc        = "Generate structured execution plans for specialist agents"
+	ToolsAIAgentsSettingLLMFallbackProvider     = "LLM Fallback Provider"
+	ToolsAIAgentsSettingLLMFallbackProviderDesc = "Provider to retry an agent call on when the primary fails (empty: none)"
 
 	// help content
 	ToolsAIAgentsSettingsHelp = `AI Agents Settings define how agents collaborate, interact with users, and handle execution control.
@@ -1391,13 +1714,16 @@ const (
 • Sploitus - Security exploits and vulnerabilities database (no API key required)
 • Perplexity - AI-powered search with reasoning
 • Tavily - Search API for AI applications
+• Firecrawl - Web search with full-page scraping (self-hosting supported)
 • Traversaal - Web scraping and search
 • Google Search - Requires API key and Custom Search Engine ID
 • Searxng - Internet metasearch engine
+• Internal Analytics Engine - Optional browser-based fallback (scrape + summarize, off by default, no API key required)
 
 Get API keys from:
 • Perplexity: https://www.perplexity.ai/
 • Tavily: https://tavily.com/
+• Firecrawl: https://www.firecrawl.dev/
 • Traversaal: https://traversaal.ai/
 • Google: https://developers.google.com/custom-search/v1/introduction`
 
@@ -1413,8 +1739,14 @@ Get API keys from:
 	ToolsSearchEnginesSploitusDesc             = "Enable Sploitus search for exploits and vulnerabilities (no API key required)"
 	ToolsSearchEnginesPerplexityKey            = "Perplexity API Key"
 	ToolsSearchEnginesPerplexityKeyDesc        = "API key for Perplexity AI search"
+	ToolsSearchEnginesPerplexityTimeout        = "Perplexity Timeout"
+	ToolsSearchEnginesPerplexityTimeoutDesc    = "Perplexity request timeout in seconds (empty: 120)"
 	ToolsSearchEnginesTavilyKey                = "Tavily API Key"
 	ToolsSearchEnginesTavilyKeyDesc            = "API key for Tavily search service"
+	ToolsSearchEnginesFirecrawlKey             = "Firecrawl API Key"
+	ToolsSearchEnginesFirecrawlKeyDesc         = "API key for Firecrawl search service"
+	ToolsSearchEnginesFirecrawlURL             = "Firecrawl API URL"
+	ToolsSearchEnginesFirecrawlURLDesc         = "Firecrawl API base URL (leave empty for cloud; set for self-hosted)"
 	ToolsSearchEnginesTraversaalKey            = "Traversaal API Key"
 	ToolsSearchEnginesTraversaalKeyDesc        = "API key for Traversaal web scraping"
 	ToolsSearchEnginesGoogleKey                = "Google Search API Key"
@@ -1435,6 +1767,12 @@ Get API keys from:
 	ToolsSearchEnginesSearxngTimeRangeDesc     = "Searxng search engine time range (day, month, year)"
 	ToolsSearchEnginesSearxngTimeout           = "Searxng Timeout"
 	ToolsSearchEnginesSearxngTimeoutDesc       = "Searxng request timeout in seconds"
+	ToolsSearchEnginesInternalEnabled          = "Internal Analytics Engine"
+	ToolsSearchEnginesInternalEnabledDesc      = "Enable the built-in browser-analytics fallback for answer/research queries (no API key required; scrapes and summarizes pages, so it requires a configured scraper and at least one available link engine, e.g. DuckDuckGo or Google)"
+	ToolsSearchEnginesInternalMaxSites         = "Internal Engine Max Sites"
+	ToolsSearchEnginesInternalMaxSitesDesc     = "Maximum number of pages to fetch and summarize per query"
+	ToolsSearchEnginesInternalMaxSiteBytes     = "Internal Engine Max Site Bytes"
+	ToolsSearchEnginesInternalMaxSiteBytesDesc = "Maximum markdown bytes read from each page before truncation"
 )
 
 // Scraper screen strings
@@ -1500,7 +1838,7 @@ const (
 Critical for penetration testing workflows requiring network scanning, custom tools, and secure task isolation.`
 
 	// General help text
-	ToolsDockerGeneralHelp = `Each AI agent task runs in an isolated Docker container with two ports (28000-32000 range) automatically allocated per flow. Worker containers are created on-demand from default images or agent-selected ones.
+	ToolsDockerGeneralHelp = `Each AI agent task runs in an isolated Docker container with two ports allocated per flow from the 2000-port window that starts at DOCKER_PORTS_BASE (28000-29999 by default). Worker containers are created on-demand from default images or agent-selected ones.
 
 Basic setup requires enabling capabilities: Docker Access allows spawning additional containers for specialized tools, while Network Admin grants low-level network permissions essential for scanning tools like nmap.
 
@@ -1533,6 +1871,14 @@ Configuration combines based on scenario: enable both capabilities for full pent
 	ToolsDockerDefaultImageDesc           = "Default Docker image for general tasks"
 	ToolsDockerDefaultImageForPentest     = "Pentesting Image"
 	ToolsDockerDefaultImageForPentestDesc = "Default Docker image for security testing tasks"
+	ToolsDockerDefaultImageForTest        = "Sandbox Self-Test Image"
+	ToolsDockerDefaultImageForTestDesc    = "Small image the startup sandbox isolation check runs in"
+	ToolsDockerImageSelectionMode         = "Image Selection Mode"
+	ToolsDockerImageSelectionModeDesc     = "How the worker image is chosen: 'llm' (agent picks) or 'fixed' (always the pentest image)"
+	ToolsDockerAllowedImages              = "Allowed Images"
+	ToolsDockerAllowedImagesDesc          = "Comma-separated allow-list the agent may pick from (empty: any image)"
+	ToolsDockerInsidePolicyTests          = "Sandbox Isolation Self-Test"
+	ToolsDockerInsidePolicyTestsDesc      = "Verify at startup that the sandbox daemon is separate and refuses host escapes"
 
 	// TLS connection settings (optional)
 	ToolsDockerHost          = "Docker Host"
@@ -1588,7 +1934,7 @@ Security Note: Host network mode reduces container isolation. Only use when nece
 
 	ToolsDockerPublicIPHelp = `Public IP Address enables out-of-band (OOB) attack techniques by providing workers with a reachable address for reverse connections.
 
-Workers automatically receive two random ports (28000-32000 range) mapped to this IP for receiving callbacks from exploited targets.
+Each flow's worker gets two ports from the 2000-port window that starts at DOCKER_PORTS_BASE (28000-29999 by default), published on this IP for receiving callbacks from exploited targets. The default 0.0.0.0 publishes them on every interface of the host.
 
 By default agents will try to get public address from the services api.ipify.org, ipinfo.io/ip or ifconfig.me.`
 
@@ -1611,6 +1957,25 @@ Should contain basic utilities and tools for general-purpose tasks. Default: deb
 	ToolsDockerDefaultImageForPentestHelp = `Pentesting Image serves as default for security testing tasks. Should include comprehensive security tools and utilities.
 
 Recommended images include Kali Linux, Parrot Security, or custom security-focused containers. Default: vxcontrol/kali-linux`
+
+	ToolsDockerDefaultImageForTestHelp = `Sandbox Self-Test Image is the small image the startup isolation check runs in and pulls into the sandbox to prove an agent could. Kept small because the check pays for it on every start.
+
+Only used when Docker Access and its Isolation Self-Test are enabled. Default: vxcontrol/kali-linux:test`
+
+	ToolsDockerImageSelectionModeHelp = `Image Selection Mode controls how a worker's container image is chosen.
+
+• llm — the agent picks the image for each task (default)
+• fixed — always use the Pentesting Image, skipping the model's choice
+
+Use 'fixed' to pin every worker to one vetted image.`
+
+	ToolsDockerAllowedImagesHelp = `Allowed Images is a comma-separated allow-list the agent may pick from when Image Selection Mode is 'llm'. A choice outside the list falls back to the Pentesting Image.
+
+Leave empty to allow any image. Example: debian:latest,vxcontrol/kali-linux`
+
+	ToolsDockerInsidePolicyTestsHelp = `Sandbox Isolation Self-Test checks at startup that the sandbox Docker daemon is separate from PentAGI's own and refuses host-escape requests, before any agent is given Docker access.
+
+Only meaningful when Docker Access is enabled. Recommended on any deployment where agents reach a Docker daemon.`
 
 	ToolsDockerHostHelp = `Docker Host uses for start primary worker containers and overrides default Docker daemon connection. Supports Unix sockets and TCP connections.
 
@@ -1665,18 +2030,6 @@ Choose carefully as changing providers requires reindexing all stored data.`
 	EmbedderFormMaxTextBytes     = "Max Text Bytes"
 	EmbedderFormMaxTextBytesDesc = "Maximum number of bytes per text chunk sent to the embedding API (e.g. 8192)"
 
-	EmbedderFormHelpTitle   = "Embedding Configuration"
-	EmbedderFormHelpContent = `Configure text vectorization for semantic search and knowledge storage.
-
-If no specific embedding settings are configured, the system will use OpenAI embeddings with the API key from LLM Providers.
-
-Change providers carefully - different embedders produce incompatible vectors requiring database reindexing.`
-
-	EmbedderFormHelpOpenAI      = "OpenAI: Most reliable option with excellent quality. Requires API key from LLM Providers if not set here."
-	EmbedderFormHelpOllama      = "Ollama: Local embeddings, no API key needed. Requires Ollama server running."
-	EmbedderFormHelpHuggingFace = "HuggingFace: Open source models with API key required."
-	EmbedderFormHelpGoogleAI    = "Google AI: Quality embeddings, requires API key."
-
 	// Provider names and descriptions
 	EmbedderProviderDefault         = "Default (OpenAI)"
 	EmbedderProviderDefaultDesc     = "Use OpenAI embeddings with API key from LLM Providers configuration"
@@ -1691,7 +2044,7 @@ Change providers carefully - different embedders produce incompatible vectors re
 	EmbedderProviderHuggingFace     = "HuggingFace"
 	EmbedderProviderHuggingFaceDesc = "HuggingFace inference API for embedding models"
 	EmbedderProviderGoogleAI        = "Google AI"
-	EmbedderProviderGoogleAIDesc    = "Google AI embedding models (embedding-001)"
+	EmbedderProviderGoogleAIDesc    = "Google AI embedding models (gemini-embedding-001)"
 	EmbedderProviderVoyageAI        = "VoyageAI"
 	EmbedderProviderVoyageAIDesc    = "VoyageAI embedding API"
 	EmbedderProviderDisabled        = "Disabled"
@@ -1704,7 +2057,7 @@ Change providers carefully - different embedders produce incompatible vectors re
 	EmbedderURLPlaceholderJina        = "https://api.jina.ai/v1"
 	EmbedderURLPlaceholderHuggingFace = "https://api-inference.huggingface.co"
 	EmbedderURLPlaceholderGoogleAI    = "Not supported - uses default endpoint"
-	EmbedderURLPlaceholderVoyageAI    = "Not supported - uses default endpoint"
+	EmbedderURLPlaceholderVoyageAI    = "https://api.voyageai.com/v1"
 
 	EmbedderAPIKeyPlaceholderOllama      = "Not required for local models"
 	EmbedderAPIKeyPlaceholderMistral     = "Mistral API key"
@@ -1757,14 +2110,20 @@ You must flush or reindex your entire knowledge base using the etester utility:
 	EmbedderHelpAttentionSuffix = `Only change providers if absolutely necessary.`
 
 	// Provider help texts
-	EmbedderHelpDefault = `Default mode uses OpenAI embeddings with the API key configured in LLM Providers.
+	EmbedderHelpOpenAIKeyRule = `When the embedder has no API Key, it uses the OpenAI key from LLM Providers, and only with the OpenAI server set there: its API Endpoint URL must be empty or name that server. An embedder API Key goes to the API Endpoint URL, or to api.openai.com when the URL is empty. Any other endpoint needs its own API Key; a local server that checks no key accepts any non-empty value.`
 
-This is the recommended option for most users as it requires no additional configuration if you already have OpenAI set up.`
+	EmbedderHelpDefault = `Default mode uses OpenAI embeddings with the server and API key configured for OpenAI in LLM Providers, and needs nothing more if OpenAI is set up there.
+
+An API Endpoint URL or API Key left from another embedding provider still applies in this mode; choose OpenAI to see or clear them.
+
+` + EmbedderHelpOpenAIKeyRule
 
 	EmbedderHelpOpenAI = `Direct OpenAI API access for embedding generation.
 
 Get your API key from:
 https://platform.openai.com/api-keys
+
+` + EmbedderHelpOpenAIKeyRule + `
 
 Recommended models:
 • text-embedding-3-small (cost-effective, 1536 dimensions)
@@ -1788,8 +2147,7 @@ Start with: ollama pull nomic-embed-text`
 Get your API key from:
 https://console.mistral.ai/
 
-Uses Mistral's embedding model with fixed configuration.
-No model selection required - uses the default embedding model.`
+Leave the Model Name empty to use mistral-embed.`
 
 	EmbedderHelpJina = `Jina AI embedding API with specialized models.
 
@@ -1960,7 +2318,7 @@ Each operation will provide real-time status updates and confirmation when requi
 	MaintenanceUpdatePentagi           = "Update PentAGI"
 	MaintenanceUpdatePentagiDesc       = "Update PentAGI to the latest version"
 	MaintenanceUpdateInstaller         = "Update Installer"
-	MaintenanceUpdateInstallerDesc     = "Update this installer to the latest version"
+	MaintenanceUpdateInstallerDesc     = "Download and verify the latest installer build"
 	MaintenanceFactoryReset            = "Factory Reset"
 	MaintenanceFactoryResetDesc        = "Reset PentAGI to factory defaults"
 	MaintenanceRemovePentagi           = "Remove PentAGI"
@@ -1983,7 +2341,7 @@ This operation requires PentAGI to be running and will update the password in th
 Enter your new password twice to confirm and press Enter to apply the change.
 
 Password requirements:
-• Minimum 5 characters
+• 16+ characters, or 8-15 with a lowercase letter, an uppercase letter, a digit and one of !@#$&*
 • Both password fields must match`
 
 	// Form fields
@@ -2001,7 +2359,8 @@ Password requirements:
 
 	// Validation errors
 	ResetPasswordErrorEmptyPassword = "Password cannot be empty"
-	ResetPasswordErrorShortPassword = "Password must be at least 5 characters long"
+	ResetPasswordErrorWeakPassword  = "Password must be 16+ characters, or 8-15 with a lowercase letter, an uppercase letter, a digit and one of !@#$&*"
+	ResetPasswordErrorLongPassword  = "Password must not exceed 72 bytes"
 	ResetPasswordErrorMismatch      = "Passwords do not match"
 
 	// Help content
@@ -2124,13 +2483,6 @@ Note: This is a large download (6GB+).`
 
 Services will be briefly unavailable during update.`
 
-	ProcessorHelpUpdateInstaller = `This will:
-• Download the latest installer binary
-• Replace the current installer
-• Exit for manual restart
-
-You'll need to restart the installer after update.`
-
 	ProcessorHelpFactoryReset = `⚠️  WARNING: This operation will:
 • Remove all containers and networks
 • Delete all configuration files
@@ -2162,6 +2514,12 @@ const (
 	EnvDesc_OPEN_AI_SERVER_URL                = "OpenAI Server URL"
 	EnvDesc_ANTHROPIC_API_KEY                 = "Anthropic API Key"
 	EnvDesc_ANTHROPIC_SERVER_URL              = "Anthropic Server URL"
+	EnvDesc_ANTHROPIC_ORGANIZATION_ID         = "Anthropic Organization ID"
+	EnvDesc_ANTHROPIC_WORKSPACE_ID            = "Anthropic Workspace ID"
+	EnvDesc_ANTHROPIC_SERVICE_ACCOUNT_ID      = "Anthropic Service Account ID"
+	EnvDesc_ANTHROPIC_IDENTITY_TOKEN          = "Anthropic Identity Token"
+	EnvDesc_ANTHROPIC_IDENTITY_TOKEN_FILE     = "Anthropic Identity Token File"
+	EnvDesc_ANTHROPIC_FEDERATION_RULE_ID      = "Anthropic Federation Rule ID"
 	EnvDesc_GEMINI_API_KEY                    = "Google Gemini API Key"
 	EnvDesc_GEMINI_SERVER_URL                 = "Gemini Server URL"
 	EnvDesc_BEDROCK_DEFAULT_AUTH              = "AWS Bedrock Use Default Credential Chain"
@@ -2171,6 +2529,7 @@ const (
 	EnvDesc_BEDROCK_SESSION_TOKEN             = "AWS Bedrock Session Token"
 	EnvDesc_BEDROCK_REGION                    = "AWS Bedrock Region"
 	EnvDesc_BEDROCK_SERVER_URL                = "AWS Bedrock Custom Endpoint URL"
+	EnvDesc_BEDROCK_CONFIG_PATH               = "AWS Bedrock Container Config Path"
 	EnvDesc_OLLAMA_SERVER_URL                 = "Ollama Server URL"
 	EnvDesc_OLLAMA_SERVER_API_KEY             = "Ollama Server API Key (Cloud)"
 	EnvDesc_OLLAMA_SERVER_MODEL               = "Ollama Default Model"
@@ -2190,13 +2549,24 @@ const (
 	EnvDesc_QWEN_API_KEY                      = "Qwen API Key"
 	EnvDesc_QWEN_SERVER_URL                   = "Qwen Server URL"
 	EnvDesc_QWEN_PROVIDER                     = "Qwen Provider Name Prefix (for LiteLLM, e.g., 'dashscope')"
+	EnvDesc_MINIMAX_API_KEY                   = "MiniMax API Key"
+	EnvDesc_MINIMAX_SERVER_URL                = "MiniMax Server URL"
+	EnvDesc_MINIMAX_PROVIDER                  = "MiniMax Provider Name Prefix (for LiteLLM, e.g., 'minimax')"
+	EnvDesc_MISTRAL_API_KEY                   = "Mistral API Key"
+	EnvDesc_MISTRAL_SERVER_URL                = "Mistral Server URL"
+	EnvDesc_MISTRAL_PROVIDER                  = "Mistral Provider Name Prefix (for LiteLLM, e.g., 'mistral')"
+	EnvDesc_XAI_API_KEY                       = "xAI API Key"
+	EnvDesc_XAI_SERVER_URL                    = "xAI Server URL"
+	EnvDesc_XAI_PROVIDER                      = "xAI Provider Name Prefix (for LiteLLM, e.g., 'xai')"
 	EnvDesc_LLM_SERVER_URL                    = "Custom LLM Server URL"
 	EnvDesc_LLM_SERVER_KEY                    = "Custom LLM API Key"
 	EnvDesc_LLM_SERVER_MODEL                  = "Custom LLM Model"
 	EnvDesc_LLM_SERVER_CONFIG_PATH            = "Custom LLM Container Config Path"
-	EnvDesc_LLM_SERVER_LEGACY_REASONING       = "Custom LLM Legacy Reasoning"
 	EnvDesc_LLM_SERVER_PRESERVE_REASONING     = "Custom LLM Preserve Reasoning Content"
+	EnvDesc_LLM_SERVER_API_TYPE               = "Custom LLM Address Convention"
+	EnvDesc_LLM_SERVER_API_VERSION            = "Custom LLM Azure API Version"
 	EnvDesc_LLM_SERVER_PROVIDER               = "Custom LLM Provider Name"
+	EnvDesc_LLM_FALLBACK_PROVIDER             = "LLM Fallback Provider"
 
 	EnvDesc_LANGFUSE_LISTEN_IP   = "Langfuse Listen IP"
 	EnvDesc_LANGFUSE_LISTEN_PORT = "Langfuse Listen Port"
@@ -2271,6 +2641,8 @@ const (
 	EnvDesc_SPLOITUS_ENABLED      = "Sploitus Search"
 	EnvDesc_PERPLEXITY_API_KEY    = "Perplexity API Key"
 	EnvDesc_TAVILY_API_KEY        = "Tavily API Key"
+	EnvDesc_FIRECRAWL_API_KEY     = "Firecrawl API Key"
+	EnvDesc_FIRECRAWL_API_URL     = "Firecrawl API URL"
 	EnvDesc_TRAVERSAAL_API_KEY    = "Traversaal API Key"
 	EnvDesc_GOOGLE_API_KEY        = "Google Search API Key"
 	EnvDesc_GOOGLE_CX_KEY         = "Google Search CX Key"
@@ -2284,16 +2656,28 @@ const (
 	EnvDesc_DOCKER_WORK_DIR                  = "Docker Work Directory"
 	EnvDesc_DOCKER_DEFAULT_IMAGE             = "Docker Default Image"
 	EnvDesc_DOCKER_DEFAULT_IMAGE_FOR_PENTEST = "Docker Pentest Image"
+	EnvDesc_DOCKER_DEFAULT_IMAGE_FOR_TEST    = "Docker Sandbox Self-Test Image"
+	EnvDesc_DOCKER_IMAGE_SELECTION_MODE      = "Docker Image Selection Mode"
+	EnvDesc_DOCKER_ALLOWED_IMAGES            = "Docker Allowed Images"
+	EnvDesc_DOCKER_INSIDE_POLICY_TESTS       = "Docker Sandbox Isolation Self-Test"
 	EnvDesc_DOCKER_HOST                      = "Docker Host"
 	EnvDesc_DOCKER_TLS_VERIFY                = "Docker TLS Verify"
 	EnvDesc_DOCKER_CERT_PATH                 = "Docker Certificate Path"
+	EnvDesc_DOCKER_INSIDE_HOST               = "Worker Docker Daemon Host"
+	EnvDesc_DOCKER_INSIDE_TLS_VERIFY         = "Worker Docker TLS Verify"
+	EnvDesc_DOCKER_INSIDE_CERT_PATH          = "Worker Docker Certificate Path"
 
+	EnvDesc_TENANT_ID                         = "PentAGI Tenant ID"
 	EnvDesc_LICENSE_KEY                       = "PentAGI License Key"
+	EnvDesc_PPROF_ADDR                        = "PentAGI pprof Listen Address"
 	EnvDesc_PENTAGI_LISTEN_IP                 = "PentAGI Server Host"
 	EnvDesc_PENTAGI_LISTEN_PORT               = "PentAGI Server Port"
 	EnvDesc_PUBLIC_URL                        = "PentAGI Public URL"
 	EnvDesc_CORS_ORIGINS                      = "PentAGI CORS Origins"
+	EnvDesc_TRUSTED_PROXIES                   = "PentAGI Trusted Proxies"
 	EnvDesc_COOKIE_SIGNING_SALT               = "PentAGI Cookie Signing Salt"
+	EnvDesc_DATABASE_EXTENSIONS_SCHEMA        = "PostgreSQL Extensions Schema"
+	EnvDesc_DATABASE_SEARCH_PATH_VIA_OPTIONS  = "PostgreSQL Search Path via Options"
 	EnvDesc_PROXY_URL                         = "HTTP/HTTPS Proxy URL"
 	EnvDesc_HTTP_CLIENT_TIMEOUT               = "HTTP Client Timeout (seconds)"
 	EnvDesc_TERMINAL_TOOL_TIMEOUT             = "Terminal Tool Timeout (seconds)"
@@ -2303,6 +2687,7 @@ const (
 	EnvDesc_PENTAGI_DATA_DIR                  = "PentAGI Data Directory"
 	EnvDesc_PENTAGI_DOCKER_SOCKET             = "Mount Docker Socket Path"
 	EnvDesc_PENTAGI_DOCKER_CERT_PATH          = "Mount Docker Certificate Path"
+	EnvDesc_PENTAGI_BEDROCK_CONFIG_PATH       = "AWS Bedrock Host Config Path"
 	EnvDesc_PENTAGI_LLM_SERVER_CONFIG_PATH    = "Custom LLM Host Config Path"
 	EnvDesc_PENTAGI_OLLAMA_SERVER_CONFIG_PATH = "Ollama Host Config Path"
 
@@ -2316,6 +2701,7 @@ const (
 
 	EnvDesc_PERPLEXITY_MODEL        = "Perplexity Model"
 	EnvDesc_PERPLEXITY_CONTEXT_SIZE = "Perplexity Context Size"
+	EnvDesc_PERPLEXITY_TIMEOUT      = "Perplexity Timeout"
 
 	EnvDesc_SEARXNG_URL        = "Searxng Search URL"
 	EnvDesc_SEARXNG_CATEGORIES = "Searxng Search Categories"
@@ -2332,12 +2718,28 @@ const (
 	EnvDesc_LANGFUSE_EE_LICENSE_KEY   = "Langfuse Enterprise License Key"
 	EnvDesc_PENTAGI_POSTGRES_PASSWORD = "PentAGI PostgreSQL Password"
 
-	EnvDesc_GRAPHITI_URL        = "Graphiti Server URL"
-	EnvDesc_GRAPHITI_TIMEOUT    = "Graphiti Request Timeout"
-	EnvDesc_GRAPHITI_MODEL_NAME = "Graphiti Extraction Model"
-	EnvDesc_NEO4J_USER          = "Neo4j Username"
-	EnvDesc_NEO4J_DATABASE      = "Neo4j Database Name"
-	EnvDesc_NEO4J_PASSWORD      = "Neo4j Database Password"
+	EnvDesc_GRAPHITI_ENABLED                      = "Enable Graphiti Integration"
+	EnvDesc_GRAPHITI_URL                          = "Graphiti Server URL"
+	EnvDesc_GRAPHITI_TIMEOUT                      = "Graphiti Request Timeout"
+	EnvDesc_GRAPHITI_LLM_CLIENT_TYPE              = "Graphiti LLM Provider Preset"
+	EnvDesc_GRAPHITI_SEPARATE_EMBEDDING           = "Graphiti Separate Embedding Endpoint"
+	EnvDesc_GRAPHITI_SEMAPHORE_LIMIT              = "Graphiti Coroutine Limit"
+	EnvDesc_GRAPHITI_LOG_LEVEL                    = "Graphiti Log Level"
+	EnvDesc_GRAPHITI_SEARCH_SCOPE                 = "Graphiti Search Scope"
+	EnvDesc_GRAPHITI_INGEST_POLICY_RULES          = "Graphiti Ingest Policy Rules"
+	EnvDesc_GRAPHITI_INGEST_POLICY_FIELD          = "Graphiti Ingest Policy Match Field"
+	EnvDesc_GRAPHITI_INGEST_POLICY_DEFAULT_ACTION = "Graphiti Default Ingest Action"
+	EnvDesc_GRAPHITI_INGEST_WORKER_COUNT          = "Graphiti Ingest Worker Count"
+	EnvDesc_GRAPHITI_INGEST_QUEUE_MAX_SIZE        = "Graphiti Ingest Queue Limit"
+	EnvDesc_GRAPHITI_TAXONOMY_LAYER_PROFILE       = "Graphiti Taxonomy Layer Profile"
+	EnvDesc_GRAPHITI_CPUS                         = "Graphiti CPU Limit"
+	EnvDesc_GRAPHITI_MEMORY                       = "Graphiti Memory Limit"
+	EnvDesc_NEO4J_USER                            = "Neo4j Username"
+	EnvDesc_NEO4J_DATABASE                        = "Neo4j Database Name"
+	EnvDesc_NEO4J_PASSWORD                        = "Neo4j Database Password"
+	EnvDesc_NEO4J_CPUS                            = "Neo4j CPU Limit"
+	EnvDesc_NEO4J_MEMORY                          = "Neo4j Memory Limit"
+	EnvDesc_NEO4J_SHM_SIZE                        = "Neo4j Shared Memory Limit"
 )
 
 // dynamic, contextual sections used in processor operation forms
@@ -2381,15 +2783,14 @@ const (
 	PlannedWillRestore  = "will restore:"
 
 	// effect notes per operation (concise and practical)
-	EffectsStart           = "PentAGI web UI becomes available. Background services are brought online in the required order."
-	EffectsStop            = "Web UI becomes unavailable. In-progress flows pause safely. When you start PentAGI again, flows resume automatically. A small portion of the current agent step may be lost."
-	EffectsRestart         = "Services stop and start again with a clean state. Brief downtime is expected. Flows resume automatically afterwards."
-	EffectsUpdateAll       = "Images are pulled and services are recreated where needed. External or disabled components are skipped. Temporary downtime is expected."
-	EffectsDownloadWorker  = "Running worker containers are not touched. New flows will use the downloaded image. To switch an existing flow to the new image, finish the flow and start a new task or create a new assistant."
-	EffectsUpdateWorker    = "Pulls latest worker image. Running worker containers keep using the old image; new containers will use the updated one."
-	EffectsUpdateInstaller = "The installer binary will be updated and the app will exit. Start the installer again to continue."
-	EffectsFactoryReset    = "Removes containers, volumes and networks, restores default .env and embedded files. Produces a clean baseline. This action cannot be undone."
-	EffectsRemove          = "Stops and removes containers but keeps volumes and images. Data is preserved. Web UI becomes unavailable until you start again."
-	EffectsPurge           = "Complete cleanup: containers, images, volumes and configuration files are deleted. Irreversible."
-	EffectsInstall         = "Required files are created and services are started. External components are detected and skipped."
+	EffectsStart          = "PentAGI web UI becomes available. Background services are brought online in the required order."
+	EffectsStop           = "Web UI becomes unavailable. In-progress flows pause safely. When you start PentAGI again, flows resume automatically. A small portion of the current agent step may be lost."
+	EffectsRestart        = "Services stop and start again with a clean state. Brief downtime is expected. Flows resume automatically afterwards."
+	EffectsUpdateAll      = "Images are pulled and services are recreated where needed. External or disabled components are skipped. Temporary downtime is expected."
+	EffectsDownloadWorker = "Running worker containers are not touched. New flows will use the downloaded image. To switch an existing flow to the new image, finish the flow and start a new task or create a new assistant."
+	EffectsUpdateWorker   = "Pulls latest worker image. Running worker containers keep using the old image; new containers will use the updated one."
+	EffectsFactoryReset   = "Removes containers, volumes and networks, restores default .env and embedded files. Produces a clean baseline. This action cannot be undone."
+	EffectsRemove         = "Stops and removes containers but keeps volumes and images. Data is preserved. Web UI becomes unavailable until you start again."
+	EffectsPurge          = "Complete cleanup: containers, images, volumes and configuration files are deleted. Irreversible."
+	EffectsInstall        = "Required files are created and services are started. External components are detected and skipped."
 )

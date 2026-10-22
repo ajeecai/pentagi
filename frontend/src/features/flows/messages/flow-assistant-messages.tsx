@@ -1,8 +1,8 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import debounce from 'lodash/debounce';
-import { Check, ChevronDown, ListFilter, Loader2, Plus, Search, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ListFilter, Plus, Search, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useDebouncedCallback } from 'use-debounce';
 import { z } from 'zod';
 
 import type { AssistantFragmentFragment, ProviderFragmentFragment } from '@/graphql/types';
@@ -16,11 +16,13 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Form, FormControl, FormField } from '@/components/ui/form';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Spinner } from '@/components/ui/spinner';
 import { StatusType } from '@/graphql/types';
 import { useAutoScroll } from '@/hooks/use-auto-scroll';
 import { Log } from '@/lib/log';
 import { cn } from '@/lib/utils';
 import { formatName } from '@/lib/utils/format';
+import { groupAssistantsByState } from '@/models/assistant';
 import { isProviderValid } from '@/models/provider';
 import { useFlow } from '@/providers/flow-provider';
 import { useProviders } from '@/providers/providers-provider';
@@ -70,33 +72,7 @@ function AssistantsDropdown({
         return assistants.findIndex((assistant) => assistant.id === selectedAssistantId);
     }, [assistants, selectedAssistantId]);
 
-    const assistantsGroup = useMemo(() => {
-        type AssistantItem = { assistant: AssistantFragmentFragment; index: number };
-
-        return assistants.reduce<{
-            active: AssistantItem[];
-            failed: AssistantItem[];
-            finished: AssistantItem[];
-        }>(
-            (accumulator, assistant, index) => {
-                const item = { assistant, index: index + 1 };
-
-                return {
-                    ...accumulator,
-                    active:
-                        assistant.status === StatusType.Running || assistant.status === StatusType.Waiting
-                            ? [...accumulator.active, item]
-                            : accumulator.active,
-                    failed: assistant.status === StatusType.Failed ? [...accumulator.failed, item] : accumulator.failed,
-                    finished:
-                        assistant.status === StatusType.Finished
-                            ? [...accumulator.finished, item]
-                            : accumulator.finished,
-                };
-            },
-            { active: [], failed: [], finished: [] },
-        );
-    }, [assistants]);
+    const assistantsGroup = useMemo(() => groupAssistantsByState(assistants), [assistants]);
 
     const handleAssistantSelect = (assistantId: string) => {
         onAssistantSelect(assistantId);
@@ -158,6 +134,7 @@ function AssistantsDropdown({
 
                 {!isDisabled && (
                     <Button
+                        aria-label={`Delete ${assistant.title}`}
                         className="text-muted-foreground hover:text-destructive absolute top-1/2 right-0.5 shrink-0 -translate-y-1/2 opacity-0 transition-opacity group-hover:opacity-100"
                         onClick={(event) => {
                             event.stopPropagation();
@@ -181,6 +158,7 @@ function AssistantsDropdown({
             >
                 <PopoverTrigger asChild>
                     <Button
+                        aria-label="Select assistant"
                         className="px-2"
                         disabled={isAssistantCreating}
                         variant="outline"
@@ -276,7 +254,7 @@ const searchFormSchema = z.object({
 });
 
 function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
-    const { providers } = useProviders();
+    const { providers, selectedProvider } = useProviders();
 
     const {
         assistantLogs: logs,
@@ -322,13 +300,9 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
 
     const searchValue = form.watch('search');
 
-    const debouncedUpdateSearch = useMemo(
-        () =>
-            debounce((value: string) => {
-                setDebouncedSearchValue(value);
-            }, 500),
-        [],
-    );
+    const debouncedUpdateSearch = useDebouncedCallback((value: string) => {
+        setDebouncedSearchValue(value);
+    }, 500);
 
     useEffect(() => {
         debouncedUpdateSearch(searchValue);
@@ -393,7 +367,7 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
 
     const handleSubmitMessage = async (values: FlowFormValues) => {
         if (!values.message.trim()) {
-            return;
+            return false;
         }
 
         setIsSubmitting(true);
@@ -402,12 +376,10 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
             if (!selectedAssistantId) {
                 setIsAssistantCreating(true);
 
-                if (createAssistant) {
-                    await createAssistant(values);
-                }
-            } else if (submitAssistantMessage) {
-                await submitAssistantMessage(selectedAssistantId, values);
+                return await createAssistant(values);
             }
+
+            return await submitAssistantMessage(selectedAssistantId, values);
         } catch (error) {
             Log.error('Error submitting message:', error);
             throw error;
@@ -495,7 +467,6 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
         <div className={cn('flex h-full flex-col', className)}>
             <div className="bg-background sticky top-0 z-10 pb-4">
                 <div className="flex gap-2 p-px">
-                    {/* Assistant Dropdown */}
                     {flowId && (
                         <AssistantsDropdown
                             assistants={assistants}
@@ -508,7 +479,6 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
                             selectedAssistantId={selectedAssistantId}
                         />
                     )}
-                    {/* Search Input */}
                     <div className="flex-1">
                         <Form {...form}>
                             <FormField
@@ -530,6 +500,7 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
                                             {field.value && (
                                                 <InputGroupAddon align="inline-end">
                                                     <InputGroupButton
+                                                        aria-label="Clear message search"
                                                         disabled={isAssistantCreating}
                                                         onClick={() => {
                                                             form.reset({ search: '' });
@@ -555,7 +526,7 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
                 <Empty>
                     <EmptyHeader>
                         <EmptyMedia variant="icon">
-                            <Loader2 className="animate-spin" />
+                            <Spinner variant="circle" />
                         </EmptyMedia>
                         <EmptyTitle>Creating assistant...</EmptyTitle>
                         <EmptyDescription>Please wait while we set up your new assistant</EmptyDescription>
@@ -580,6 +551,7 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
 
                         {!isScrolledToBottom && (
                             <Button
+                                aria-label="Scroll to latest message"
                                 className="absolute right-4 bottom-4 z-10 shadow-md hover:shadow-lg"
                                 onClick={() => scrollToEnd()}
                                 size="icon-sm"
@@ -638,7 +610,7 @@ function FlowAssistantMessages({ className }: FlowAssistantMessagesProps) {
             <div className="bg-background sticky bottom-0 p-px">
                 <FlowForm
                     defaultValues={{
-                        providerName: selectedAssistant?.provider?.name ?? '',
+                        providerName: selectedAssistant?.provider?.name ?? selectedProvider?.name ?? '',
                         useAgents: shouldUseAgents,
                     }}
                     isCanceling={isCanceling}

@@ -2,9 +2,7 @@ package checker
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -22,10 +20,7 @@ import (
 
 	"pentagi/cmd/installer/state"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 )
 
 type DockerVersion struct {
@@ -37,53 +32,6 @@ type ImageInfo struct {
 	Name string
 	Tag  string
 	Hash string
-}
-
-type CheckUpdatesRequest struct {
-	InstallerOsType         string  `json:"installer_os_type"`
-	InstallerVersion        string  `json:"installer_version"`
-	PentagiImageName        *string `json:"pentagi_image_name,omitempty"`
-	PentagiImageTag         *string `json:"pentagi_image_tag,omitempty"`
-	PentagiImageHash        *string `json:"pentagi_image_hash,omitempty"`
-	WorkerImageName         *string `json:"worker_image_name,omitempty"`
-	WorkerImageTag          *string `json:"worker_image_tag,omitempty"`
-	WorkerImageHash         *string `json:"worker_image_hash,omitempty"`
-	GraphitiConnected       bool    `json:"graphiti_connected"`
-	GraphitiInstalled       bool    `json:"graphiti_installed"`
-	GraphitiExternal        bool    `json:"graphiti_external"`
-	GraphitiImageName       *string `json:"graphiti_image_name,omitempty"`
-	GraphitiImageTag        *string `json:"graphiti_image_tag,omitempty"`
-	GraphitiImageHash       *string `json:"graphiti_image_hash,omitempty"`
-	Neo4jImageName          *string `json:"neo4j_image_name,omitempty"`
-	Neo4jImageTag           *string `json:"neo4j_image_tag,omitempty"`
-	Neo4jImageHash          *string `json:"neo4j_image_hash,omitempty"`
-	LangfuseConnected       bool    `json:"langfuse_connected"`
-	LangfuseInstalled       bool    `json:"langfuse_installed"`
-	LangfuseExternal        bool    `json:"langfuse_external"`
-	ObservabilityConnected  bool    `json:"observability_connected"`
-	ObservabilityExternal   bool    `json:"observability_external"`
-	ObservabilityInstalled  bool    `json:"observability_installed"`
-	LangfuseWorkerImageName *string `json:"langfuse_worker_image_name,omitempty"`
-	LangfuseWorkerImageTag  *string `json:"langfuse_worker_image_tag,omitempty"`
-	LangfuseWorkerImageHash *string `json:"langfuse_worker_image_hash,omitempty"`
-	LangfuseWebImageName    *string `json:"langfuse_web_image_name,omitempty"`
-	LangfuseWebImageTag     *string `json:"langfuse_web_image_tag,omitempty"`
-	LangfuseWebImageHash    *string `json:"langfuse_web_image_hash,omitempty"`
-	GrafanaImageName        *string `json:"grafana_image_name,omitempty"`
-	GrafanaImageTag         *string `json:"grafana_image_tag,omitempty"`
-	GrafanaImageHash        *string `json:"grafana_image_hash,omitempty"`
-	OpenTelemetryImageName  *string `json:"otel_image_name,omitempty"`
-	OpenTelemetryImageTag   *string `json:"otel_image_tag,omitempty"`
-	OpenTelemetryImageHash  *string `json:"otel_image_hash,omitempty"`
-}
-
-type CheckUpdatesResponse struct {
-	InstallerIsUpToDate     bool `json:"installer_is_up_to_date"`
-	PentagiIsUpToDate       bool `json:"pentagi_is_up_to_date"`
-	GraphitiIsUpToDate      bool `json:"graphiti_is_up_to_date"`
-	LangfuseIsUpToDate      bool `json:"langfuse_is_up_to_date"`
-	ObservabilityIsUpToDate bool `json:"observability_is_up_to_date"`
-	WorkerIsUpToDate        bool `json:"worker_is_up_to_date"`
 }
 
 func checkFileExists(path string) bool {
@@ -138,9 +86,7 @@ func getProxyURL(appState state.State) string {
 }
 
 func createDockerClient(host, certPath string, tlsVerify bool) (*client.Client, error) {
-	opts := []client.Opt{
-		client.WithAPIVersionNegotiation(),
-	}
+	var opts []client.Opt
 
 	if host != "" {
 		opts = append(opts, client.WithHost(host))
@@ -154,7 +100,7 @@ func createDockerClient(host, certPath string, tlsVerify bool) (*client.Client, 
 		))
 	}
 
-	return client.NewClientWithOpts(opts...)
+	return client.New(opts...)
 }
 
 // createDockerClientFromEnv creates a docker client and returns the error type
@@ -165,13 +111,13 @@ func createDockerClientFromEnv(ctx context.Context) (*client.Client, DockerError
 		return nil, DockerErrorNotInstalled
 	}
 
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		return nil, DockerErrorAPIError
 	}
 
 	// try to ping the daemon
-	_, err = cli.Ping(ctx)
+	_, err = cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true})
 	if err != nil {
 		cli.Close() // close client on error
 		// check if it's a connection error (daemon not running)
@@ -206,7 +152,7 @@ const (
 )
 
 func checkDockerVersion(ctx context.Context, cli *client.Client) DockerVersion {
-	version, err := cli.ServerVersion(ctx)
+	version, err := cli.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
 		return DockerVersion{Version: "", Valid: false}
 	}
@@ -290,12 +236,12 @@ func checkVersionCompatibility(version, minVersion string) bool {
 }
 
 func checkContainerExists(ctx context.Context, cli *client.Client, name string) (exists, running bool) {
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	containers, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
 		return false, false
 	}
 
-	for _, cont := range containers {
+	for _, cont := range containers.Items {
 		for _, containerName := range cont.Names {
 			if strings.TrimPrefix(containerName, "/") == name {
 				return true, cont.State == "running"
@@ -313,14 +259,14 @@ func checkVolumesExist(ctx context.Context, cli *client.Client, volumeNames []st
 		return false
 	}
 
-	volumes, err := cli.VolumeList(ctx, volume.ListOptions{})
+	volumes, err := cli.VolumeList(ctx, client.VolumeListOptions{})
 	if err != nil {
 		return false
 	}
 
 	// collect all volume names from Docker
-	existingVolumes := make([]string, 0, len(volumes.Volumes))
-	for _, vol := range volumes.Volumes {
+	existingVolumes := make([]string, 0, len(volumes.Items))
+	for _, vol := range volumes.Items {
 		existingVolumes = append(existingVolumes, vol.Name)
 	}
 
@@ -430,6 +376,9 @@ func getLinuxAvailableMemoryGB() float64 {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return 0.0
+	}
 
 	availableMemGB := float64(memAvailable) / (1024 * 1024 * 1024)
 	if availableMemGB > 0 {
@@ -519,6 +468,9 @@ func checkLinuxMemory(requiredGB float64) bool {
 				}
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return true // assume OK if can't check
 	}
 
 	availableMemGB := float64(memAvailable) / (1024 * 1024 * 1024)
@@ -782,23 +734,6 @@ func getNetworkFailures(ctx context.Context, proxyURL string, dockerClient, work
 	return failures
 }
 
-func getContainerImageInfo(ctx context.Context, cli *client.Client, containerName string) *ImageInfo {
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
-	if err != nil {
-		return nil
-	}
-
-	for _, cont := range containers {
-		for _, name := range cont.Names {
-			if strings.TrimPrefix(name, "/") == containerName {
-				return parseImageRef(cont.Image, cont.ImageID)
-			}
-		}
-	}
-
-	return nil
-}
-
 func checkImageExists(ctx context.Context, cli *client.Client, imageName string) bool {
 	imageInfo := getImageInfo(ctx, cli, imageName)
 	return imageInfo != nil && imageInfo.Hash != ""
@@ -809,7 +744,7 @@ func getImageInfo(ctx context.Context, cli *client.Client, imageName string) *Im
 		return nil
 	}
 
-	images, err := cli.ImageList(ctx, image.ListOptions{})
+	images, err := cli.ImageList(ctx, client.ImageListOptions{})
 	if err != nil {
 		return nil
 	}
@@ -820,7 +755,7 @@ func getImageInfo(ctx context.Context, cli *client.Client, imageName string) *Im
 	}
 
 	fullImageName := imageInfo.Name + ":" + imageInfo.Tag
-	for _, img := range images {
+	for _, img := range images.Items {
 		for _, tag := range img.RepoTags {
 			if tag == imageName || tag == fullImageName {
 				imageInfo.Hash = img.ID
@@ -832,6 +767,26 @@ func getImageInfo(ctx context.Context, cli *client.Client, imageName string) *Im
 	return imageInfo
 }
 
+// isDockerHubHost reports whether a leading path element is one of the names
+// Docker Hub answers to. It is a closed list and not a shape test: "contains a
+// dot or a colon" describes every registry there is.
+func isDockerHubHost(head string) bool {
+	switch head {
+	case "docker.io", "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseImageRef splits a Docker image reference into the repository and tag the update
+// server matches on, plus whatever digest the reference or the daemon carried.
+//
+// The shape is [registry[:port]/]path[:tag][@digest]. The colon of a registry port and the
+// colon of a tag are told apart by position, not by content: a tag colon is the last colon
+// after the last slash, so a version-numbered tag such as "11.4.0" is not taken for a port.
+// A mangled pair fails silently: the update server matches on the repository and tag pair,
+// and a pair it does not track is offered nothing, which reads as "nothing to update".
 func parseImageRef(imageRef, imageID string) *ImageInfo {
 	if imageRef == "" {
 		return nil
@@ -841,122 +796,53 @@ func parseImageRef(imageRef, imageID string) *ImageInfo {
 		Hash: imageID,
 	}
 
-	// normalize the image reference
 	originalRef := imageRef
 
-	// parse hash if present (image@sha256:...)
-	if strings.Contains(imageRef, "@") {
-		parts := strings.SplitN(imageRef, "@", 2)
-		imageRef = parts[0]
-		if len(parts) > 1 {
-			info.Hash = parts[1]
+	// A digest pins the reference and is not part of the name.
+	if base, digest, found := strings.Cut(imageRef, "@"); found {
+		imageRef = base
+		if digest != "" {
+			info.Hash = digest
 		}
 	}
 
-	// handle registry/namespace/repository parsing
-	var name string
-	if strings.Contains(imageRef, "/") {
-		// has registry or namespace
-		nameParts := strings.Split(imageRef, "/")
-		if len(nameParts) >= 2 {
-			// check if first part looks like a registry (contains . or :)
-			if strings.Contains(nameParts[0], ".") || strings.Contains(nameParts[0], ":") {
-				// first part is registry, skip it for name extraction
-				if len(nameParts) > 2 {
-					name = strings.Join(nameParts[1:], "/")
-				} else {
-					name = nameParts[1]
-				}
-			} else {
-				// no registry, combine all parts as name
-				name = imageRef
-			}
-		} else {
-			name = imageRef
+	// The registry host is dropped ONLY for Docker Hub, and keeping it everywhere
+	// else is the whole point.
+	//
+	// The service stores a reference the way compose writes it: bare for Docker
+	// Hub, host and all for anywhere else — `gcr.io/cadvisor/cadvisor`, not
+	// `cadvisor/cadvisor`. Those two are different images: the second is a Docker
+	// Hub repository that has nothing to do with cAdvisor. The match is an exact
+	// string comparison, so a reference of another registry reported without its
+	// host is answered `repository_not_tracked` and takes its whole stack's
+	// resolution down to `not_tracked`.
+	if head, rest, found := strings.Cut(imageRef, "/"); found {
+		if isDockerHubHost(head) {
+			imageRef = rest
 		}
-	} else {
-		name = imageRef
 	}
 
-	// parse name and tag
-	if strings.Contains(name, ":") {
-		parts := strings.SplitN(name, ":", 2)
-		info.Name = parts[0]
-		if len(parts) > 1 && parts[1] != "" {
-			// validate that it's not a port number (for registry detection edge case)
-			if !strings.Contains(parts[1], ".") {
-				info.Tag = parts[1]
-			} else {
-				info.Name = name
-				info.Tag = "latest"
-			}
-		}
-	} else {
-		info.Name = name
-		info.Tag = "latest"
+	// Docker Hub spells an official image "library/nginx" in full; every other place spells
+	// it "nginx", and that is the form the server is asked about.
+	imageRef = strings.TrimPrefix(imageRef, "library/")
+
+	// The tag is what follows the last colon, and only when that colon comes after the last
+	// slash — otherwise it belongs to a registry port that was kept as part of the name.
+	name, tag := imageRef, ""
+	if colon := strings.LastIndex(imageRef, ":"); colon > strings.LastIndex(imageRef, "/") {
+		name, tag = imageRef[:colon], imageRef[colon+1:]
 	}
 
-	// if we still don't have a tag, default to latest
+	info.Name, info.Tag = name, tag
 	if info.Tag == "" {
 		info.Tag = "latest"
 	}
-
-	// validate that name is not empty
 	if info.Name == "" {
 		info.Name = originalRef
 		info.Tag = "latest"
 	}
 
 	return info
-}
-
-func checkUpdatesServer(
-	ctx context.Context,
-	serverURL, proxyURL string,
-	request CheckUpdatesRequest,
-) *CheckUpdatesResponse {
-	jsonData, err := json.Marshal(request)
-	if err != nil {
-		return nil
-	}
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	if proxyURL != "" {
-		if proxyURLParsed, err := url.Parse(proxyURL); err == nil {
-			client.Transport = &http.Transport{
-				Proxy: http.ProxyURL(proxyURLParsed),
-			}
-		}
-	}
-
-	fullURL := serverURL + UpdatesCheckEndpoint
-	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", UserAgent)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	var response CheckUpdatesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil
-	}
-
-	return &response
 }
 
 func checkDNSResolution(hostname string) bool {
@@ -1011,7 +897,7 @@ func checkDockerPullConnectivity(ctx context.Context, dockerClient, workerClient
 
 func checkSingleDockerPull(ctx context.Context, cli *client.Client, imageName string) bool {
 	// try to pull the image
-	reader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+	reader, err := cli.ImagePull(ctx, imageName, client.ImagePullOptions{})
 	if err != nil {
 		return false
 	}

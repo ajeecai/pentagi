@@ -81,6 +81,7 @@ type User struct {
 	RoleID                 uint64     `form:"role_id" json:"role_id" validate:"min=0,numeric,required" gorm:"type:BIGINT;NOT NULL;default:2"`
 	PasswordChangeRequired bool       `form:"password_change_required" json:"password_change_required" gorm:"type:BOOL;NOT NULL;default:false"`
 	Provider               *string    `form:"provider,omitempty" json:"provider,omitempty" validate:"omitempty" gorm:"type:TEXT"`
+	SessionGeneration      uint64     `form:"-" json:"-" validate:"min=0,numeric" gorm:"type:BIGINT;NOT NULL;default:1"`
 	CreatedAt              time.Time  `form:"created_at" json:"created_at" validate:"omitempty" gorm:"type:TIMESTAMPTZ;NOT NULL;default:CURRENT_TIMESTAMP"`
 }
 
@@ -103,7 +104,7 @@ func (u User) Validate(db *gorm.DB) {
 
 // UserPassword is model to contain user information
 type UserPassword struct {
-	Password string `form:"password" json:"password" validate:"max=100,required" gorm:"column:password;type:TEXT"`
+	Password string `form:"password" json:"password" validate:"stpass,passlen,required" gorm:"column:password;type:TEXT"`
 	User     `form:"" json:""`
 }
 
@@ -168,7 +169,7 @@ func (au AuthCallback) Valid() error {
 // nolint:lll
 type Password struct {
 	CurrentPassword string `form:"current_password" json:"current_password" validate:"nefield=Password,min=5,max=100,required" gorm:"-"`
-	Password        string `form:"password" json:"password" validate:"stpass,max=100,required" gorm:"type:TEXT"`
+	Password        string `form:"password" json:"password" validate:"stpass,passlen,required" gorm:"type:TEXT"`
 	ConfirmPassword string `form:"confirm_password" json:"confirm_password" validate:"eqfield=Password" gorm:"-"`
 }
 
@@ -189,7 +190,6 @@ func (p Password) Validate(db *gorm.DB) {
 	}
 }
 
-// UserRole is model to contain user information linked with user role
 // nolint:lll
 type UserRole struct {
 	Role Role `form:"role,omitempty" json:"role,omitempty" gorm:"association_autoupdate:false;association_autocreate:false"`
@@ -301,4 +301,37 @@ func NewUserPreferences(userID uint64) *UserPreferences {
 type UserWithPreferences struct {
 	User        User
 	Preferences UserPreferences
+}
+
+// EmailChange is model to contain user email to change it
+type EmailChange struct {
+	CurrentPassword string `form:"current_password" json:"current_password" validate:"min=5,max=100,required" gorm:"-"`
+	Mail            string `form:"mail" json:"mail" validate:"max=50,realemail,required" gorm:"type:TEXT"`
+}
+
+// TableName returns the table name string to guaranty use correct table
+func (ec *EmailChange) TableName() string {
+	return "users"
+}
+
+// Valid is function to control input/output data
+func (ec EmailChange) Valid() error {
+	return validate.Struct(ec)
+}
+
+// Validate is function to use callback to control input/output data
+func (ec EmailChange) Validate(db *gorm.DB) {
+	if err := ec.Valid(); err != nil {
+		db.AddError(err)
+	}
+}
+
+// NameChange is model to contain user display name to change it
+type NameChange struct {
+	Name string `form:"name" json:"name" validate:"min=1,max=70,required" gorm:"type:TEXT"`
+}
+
+// Valid is function to control input/output data
+func (nc NameChange) Valid() error {
+	return validate.Struct(nc)
 }

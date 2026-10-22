@@ -1,8 +1,8 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import debounce from 'lodash/debounce';
 import { ChevronDown, ListTodo, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useDebouncedCallback } from 'use-debounce';
 import { z } from 'zod';
 
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/
 import { Form, FormControl, FormField } from '@/components/ui/form';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
 import { useAutoScroll } from '@/hooks/use-auto-scroll';
+import { matchesSearchTerm } from '@/lib/text-filter';
 import { useFlow } from '@/providers/flow-provider';
 
 import FlowTask from './flow-task';
@@ -17,14 +18,6 @@ import FlowTask from './flow-task';
 const searchFormSchema = z.object({
     search: z.string(),
 });
-
-const containsSearchValue = (text: null | string | undefined, searchValue: string): boolean => {
-    if (!text || !searchValue.trim()) {
-        return false;
-    }
-
-    return text.toLowerCase().includes(searchValue.toLowerCase().trim());
-};
 
 function FlowTasks() {
     const { flowData, flowId } = useFlow();
@@ -43,13 +36,9 @@ function FlowTasks() {
 
     const searchValue = form.watch('search');
 
-    const debouncedUpdateSearch = useMemo(
-        () =>
-            debounce((value: string) => {
-                setDebouncedSearchValue(value);
-            }, 500),
-        [],
-    );
+    const debouncedUpdateSearch = useDebouncedCallback((value: string) => {
+        setDebouncedSearchValue(value);
+    }, 500);
 
     useEffect(() => {
         debouncedUpdateSearch(searchValue);
@@ -79,14 +68,14 @@ function FlowTasks() {
         }
 
         return tasks.filter((task) => {
-            const taskMatches = containsSearchValue(task.title, search) || containsSearchValue(task.result, search);
+            const taskMatches = matchesSearchTerm(task.title, search) || matchesSearchTerm(task.result, search);
 
             const subtaskMatches =
                 task.subtasks?.some(
                     (subtask) =>
-                        containsSearchValue(subtask.title, search) ||
-                        containsSearchValue(subtask.description, search) ||
-                        containsSearchValue(subtask.result, search),
+                        matchesSearchTerm(subtask.title, search) ||
+                        matchesSearchTerm(subtask.description, search) ||
+                        matchesSearchTerm(subtask.result, search),
                 ) || false;
 
             return taskMatches || subtaskMatches;
@@ -119,6 +108,7 @@ function FlowTasks() {
                                         {field.value && (
                                             <InputGroupAddon align="inline-end">
                                                 <InputGroupButton
+                                                    aria-label="Clear task search"
                                                     onClick={() => {
                                                         form.reset({ search: '' });
                                                         setDebouncedSearchValue('');
@@ -156,6 +146,7 @@ function FlowTasks() {
 
                     {!isScrolledToBottom && (
                         <Button
+                            aria-label="Scroll to latest task"
                             className="absolute right-4 bottom-4 z-10 shadow-md hover:shadow-lg"
                             onClick={() => scrollToEnd()}
                             size="icon-sm"

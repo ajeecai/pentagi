@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
+	"github.com/sirupsen/logrus"
 )
 
 type assistants struct {
@@ -68,7 +69,7 @@ func NewAssistantService(
 	}
 }
 
-// GetAssistants is a function to return assistants list
+// GetFlowAssistants is a function to return assistants list of the flow
 // @Summary Retrieve assistants list
 // @Tags Assistants
 // @Produce json
@@ -121,7 +122,7 @@ func (s *AssistantService) GetFlowAssistants(c *gin.Context) {
 		return
 	}
 
-	query.Init("assistants", assistantsSQLMappers)
+	_ = query.Init("assistants", assistantsSQLMappers)
 
 	if query.Group != "" {
 		if _, ok := assistantsSQLMappers[query.Group]; !ok {
@@ -320,7 +321,7 @@ func (s *AssistantService) CreateFlowAssistant(c *gin.Context) {
 		return
 	}
 
-	aw, err := s.fc.CreateAssistant(
+	assistantID, err := s.fc.CreateAssistant(
 		c,
 		int64(uid),
 		int64(flowID),
@@ -337,7 +338,7 @@ func (s *AssistantService) CreateFlowAssistant(c *gin.Context) {
 		return
 	}
 
-	if err = s.db.Model(&resp.Assistant).Where("id = ?", aw.GetAssistantID()).Take(&resp.Assistant).Error; err != nil {
+	if err = s.db.Model(&resp.Assistant).Where("id = ?", assistantID).Take(&resp.Assistant).Error; err != nil {
 		logger.FromContext(c).WithError(err).Errorf("error getting assistant by id")
 		response.Error(c, response.ErrInternal, err)
 		return
@@ -432,6 +433,10 @@ func (s *AssistantService) PatchAssistant(c *gin.Context) {
 
 	fw, err := s.fc.GetFlow(c, int64(flowID))
 	if err != nil {
+		if errors.Is(err, controller.ErrFlowNotFound) {
+			response.ErrorWithLevel(c, response.ErrFlowsNotFound, err, logrus.WarnLevel)
+			return
+		}
 		logger.FromContext(c).WithError(err).Errorf("error getting flow by id in flow controller")
 		response.Error(c, response.ErrInternal, err)
 		return
@@ -565,6 +570,10 @@ func (s *AssistantService) DeleteAssistant(c *gin.Context) {
 
 	fw, err := s.fc.GetFlow(c, int64(flowID))
 	if err != nil {
+		if errors.Is(err, controller.ErrFlowNotFound) {
+			response.ErrorWithLevel(c, response.ErrFlowsNotFound, err, logrus.WarnLevel)
+			return
+		}
 		logger.FromContext(c).WithError(err).Errorf("error getting flow by id in flow controller")
 		response.Error(c, response.ErrInternal, err)
 		return

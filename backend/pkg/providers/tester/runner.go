@@ -9,20 +9,23 @@ import (
 
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
-	"pentagi/pkg/providers/tester/testdata"
+	"pentagi/pkg/providers/tester/cases"
+	"pentagi/pkg/templates"
+
+	"github.com/vxcontrol/langchaingo/llms"
 )
 
 // testRequest represents a test execution request
 type testRequest struct {
 	agentType pconfig.ProviderOptionsType
-	testCase  testdata.TestCase
+	testCase  cases.TestCase
 	provider  provider.Provider
 }
 
 // testResponse represents a test execution result
 type testResponse struct {
 	agentType pconfig.ProviderOptionsType
-	result    testdata.TestResult
+	result    cases.TestResult
 	err       error
 }
 
@@ -31,20 +34,28 @@ func TestProvider(ctx context.Context, prv provider.Provider, opts ...TestOption
 	config := applyOptions(opts)
 
 	// load test registry
-	var registry *testdata.TestRegistry
+	var registry *cases.TestRegistry
 	var err error
 
 	if config.customRegistry != nil {
 		registry = config.customRegistry
 	} else {
-		registry, err = testdata.LoadBuiltinRegistry()
+		registry, err = cases.LoadBuiltinRegistry()
 		if err != nil {
 			return ProviderTestResults{}, fmt.Errorf("failed to load test registry: %w", err)
 		}
 	}
 
+	var toolCallIDTemplate string
+	if registry.ReplaysToolCalls(config.groups...) {
+		toolCallIDTemplate = providerToolCallIDTemplate(ctx, prv, config.verbose)
+	}
+
 	// collect all test requests
-	requests := collectTestRequests(registry, prv, config)
+	requests, err := collectTestRequests(registry, prv, config, toolCallIDTemplate)
+	if err != nil {
+		return ProviderTestResults{}, err
+	}
 	if len(requests) == 0 {
 		return ProviderTestResults{}, fmt.Errorf("no tests to execute")
 	}
@@ -56,8 +67,21 @@ func TestProvider(ctx context.Context, prv provider.Provider, opts ...TestOption
 	return groupResults(responses), nil
 }
 
+func providerToolCallIDTemplate(ctx context.Context, prv provider.Provider, verbose bool) string {
+	template, err := prv.GetToolCallIDTemplate(provider.WithoutToolCallIDTemplateCache(ctx), templates.NewDefaultPrompter())
+	if err != nil && verbose {
+		log.Printf("Warning: no tool call ID template, replayed tool calls keep the ids of the case: %v", err)
+	}
+	return template
+}
+
 // collectTestRequests gathers all test requests based on configuration
-func collectTestRequests(registry *testdata.TestRegistry, prv provider.Provider, config *testConfig) []testRequest {
+func collectTestRequests(
+	registry *cases.TestRegistry,
+	prv provider.Provider,
+	config *testConfig,
+	toolCallIDTemplate string,
+) ([]testRequest, error) {
 	var requests []testRequest
 
 	// create agent type filter
@@ -68,28 +92,31 @@ func collectTestRequests(registry *testdata.TestRegistry, prv provider.Provider,
 
 	// collect tests from each group
 	for _, group := range config.groups {
-		suite, err := registry.GetTestSuite(group)
-		if err != nil {
-			if config.verbose {
-				log.Printf("Warning: failed to get test suite for group %s: %v", group, err)
-			}
-			continue
-		}
-
-		for _, testCase := range suite.Tests {
-			// skip streaming tests if disabled
-			if testCase.Streaming() && !config.streamingMode {
+		for _, agentType := range config.agentTypes {
+			if len(agentFilter) > 0 && !agentFilter[agentType] {
 				continue
 			}
 
-			// create requests for each agent type
-			for _, agentType := range config.agentTypes {
-				if len(agentFilter) > 0 && !agentFilter[agentType] {
+			suite, err := registry.GetTestSuite(group, cases.WithToolCallIDTemplate(toolCallIDTemplate))
+			if err != nil {
+				return nil, fmt.Errorf("test group %s: %w", group, err)
+			}
+
+			for _, testCase := range suite.Tests {
+				if testCase.Streaming() && !config.streamingMode {
 					continue
 				}
 
 				// filter test types based on agent type
 				if !isTestCompatibleWithAgent(testCase.Type(), agentType) {
+					continue
+				}
+
+				// skip capability-gated tests (adaptive thinking, reasoning
+				// off, structured output) whose wire behavior this agent's
+				// ACTUAL config wouldn't produce in a real PentAGI flow — see
+				// capabilitySupported for why.
+				if !capabilitySupported(prv, agentType, testCase.Capability()) {
 					continue
 				}
 
@@ -100,9 +127,45 @@ func collectTestRequests(registry *testdata.TestRegistry, prv provider.Provider,
 				})
 			}
 		}
+
+		if group != cases.TestGroupAdvanced {
+			continue
+		}
+
+		// fileEditTestCase is hand-built in Go, not tests.yml (see
+		// newFileEditTestCase) - its whole point is a genuinely dynamic
+		// exchange that can't be expressed as a fixed message list, so it
+		// can't come from the YAML-driven registry like every other test
+		// here. It's added for TestGroupAdvanced so it still runs by default
+		// without a special opt-in.
+		for _, agentType := range config.agentTypes {
+			if len(agentFilter) > 0 && !agentFilter[agentType] {
+				continue
+			}
+			if !isTestCompatibleWithAgent(cases.TestTypeFileEdit, agentType) {
+				continue
+			}
+			if !capabilitySupported(prv, agentType, cases.CapabilityNone) {
+				continue
+			}
+
+			fileEdit, err := newFileEditTestCase()
+			if err != nil {
+				if config.verbose {
+					log.Printf("Warning: failed to build file_edit test case: %v", err)
+				}
+				break // same failure for every agentType - no point retrying
+			}
+
+			requests = append(requests, testRequest{
+				agentType: agentType,
+				testCase:  fileEdit,
+				provider:  prv,
+			})
+		}
 	}
 
-	return requests
+	return requests, nil
 }
 
 // executeTestsParallel runs tests concurrently using worker pool
@@ -173,65 +236,192 @@ func testWorker(ctx context.Context, requests <-chan testRequest, responses chan
 }
 
 // executeTest runs a single test case
-func executeTest(ctx context.Context, req testRequest) (testdata.TestResult, error) {
+func executeTest(ctx context.Context, req testRequest) (cases.TestResult, error) {
 	startTime := time.Now()
 
-	var response interface{}
+	var response any
 	var err error
 
-	// execute based on test type and available data
+	extra := req.testCase.ExtraOptions()
+
+	var call func() (any, error)
+
 	switch {
+	case len(extra) > 0:
+		if len(req.testCase.Messages()) == 0 {
+			return cases.TestResult{}, fmt.Errorf(
+				"test case carries extra call options but no messages: only the prompt-only path is available, and it cannot carry them")
+		}
+		call = func() (any, error) {
+			return req.provider.CallWithExtraOptions(
+				ctx,
+				req.agentType,
+				req.testCase.Messages(),
+				req.testCase.Tools(),
+				req.testCase.StreamingCallback(),
+				extra...,
+			)
+		}
 	case len(req.testCase.Messages()) > 0 && len(req.testCase.Tools()) > 0:
-		// tool calling with messages
-		response, err = req.provider.CallWithTools(
-			ctx,
-			req.agentType,
-			req.testCase.Messages(),
-			req.testCase.Tools(),
-			req.testCase.StreamingCallback(),
-		)
+		call = func() (any, error) {
+			return req.provider.CallWithTools(
+				ctx,
+				req.agentType,
+				req.testCase.Messages(),
+				req.testCase.Tools(),
+				req.testCase.StreamingCallback(),
+			)
+		}
 	case len(req.testCase.Messages()) > 0:
-		// messages without tools
-		response, err = req.provider.CallEx(
-			ctx,
-			req.agentType,
-			req.testCase.Messages(),
-			req.testCase.StreamingCallback(),
-		)
+		call = func() (any, error) {
+			return req.provider.CallEx(
+				ctx,
+				req.agentType,
+				req.testCase.Messages(),
+				req.testCase.StreamingCallback(),
+			)
+		}
 	case req.testCase.Prompt() != "":
-		// simple prompt
-		response, err = req.provider.Call(ctx, req.agentType, req.testCase.Prompt())
+		call = func() (any, error) {
+			return req.provider.Call(ctx, req.agentType, req.testCase.Prompt())
+		}
 	default:
-		return testdata.TestResult{}, fmt.Errorf("test case has no prompt or messages")
+		return cases.TestResult{}, fmt.Errorf("test case has no prompt or messages")
+	}
+
+	response, err = call()
+
+	// MultiTurnTestCase (e.g. fileEditTestCase's read_file -> edit_file
+	// exchange) answers each tool call itself and asks for another round by
+	// returning true; every other TestCase leaves this a no-op.
+	if multiTurn, ok := req.testCase.(cases.MultiTurnTestCase); ok {
+		for err == nil {
+			contentResp, isContentResp := response.(*llms.ContentResponse)
+			if !isContentResp || !multiTurn.HandleToolResponse(contentResp) {
+				break
+			}
+			response, err = call()
+		}
 	}
 
 	latency := time.Since(startTime)
 
-	if err != nil {
-		return testdata.TestResult{
-			ID:      req.testCase.ID(),
-			Name:    req.testCase.Name(),
-			Type:    req.testCase.Type(),
-			Group:   req.testCase.Group(),
-			Success: false,
-			Error:   err,
-			Latency: latency,
-		}, nil
+	if want := req.testCase.ExpectRefusal(); err != nil || want != cases.RefusalNone {
+		return judgeRefusal(req.testCase, want, err, latency), nil
+	}
+
+	if req.testCase.ExpectTruncated() {
+		return judgeTruncation(req.testCase, response, latency), nil
 	}
 
 	// let test case validate and produce result
-	return req.testCase.Execute(response, latency), nil
+	result := req.testCase.Execute(response, latency)
+	result.Capability = req.testCase.Capability()
+	result.StopReason = stopReasonOf(response)
+	if !result.Success && cases.IsContentFilterStopReason(result.StopReason) {
+		result.ContentFiltered = true
+		result.Error = fmt.Errorf("the vendor's content filter stopped the answer (stop reason %q): %w",
+			result.StopReason, result.Error)
+	}
+	return result, nil
+}
+
+func stopReasonOf(response any) string {
+	contentResp, isContentResp := response.(*llms.ContentResponse)
+	if !isContentResp || len(contentResp.Choices) == 0 || contentResp.Choices[0] == nil {
+		return ""
+	}
+	return contentResp.Choices[0].StopReason
+}
+
+func judgeTruncation(tc cases.TestCase, response any, latency time.Duration) cases.TestResult {
+	result := cases.TestResult{
+		ID:         tc.ID(),
+		Name:       tc.Name(),
+		Type:       tc.Type(),
+		Group:      tc.Group(),
+		Capability: tc.Capability(),
+		Latency:    latency,
+		StopReason: stopReasonOf(response),
+	}
+
+	limitChange, limitChanged := outputLimitChange(response)
+
+	switch {
+	case result.StopReason == "":
+		result.Error = fmt.Errorf("the answer carries no stop reason, so the output limit cannot be observed")
+	case cases.IsTruncationStopReason(result.StopReason):
+		result.Success = true
+	case limitChanged:
+		result.Success = true
+		result.Unsupported = true
+		result.Error = fmt.Errorf("the output limit the case asks for did not reach the vendor, "+
+			"so the answer had room to finish (stop reason %q): %s", result.StopReason, limitChange)
+	default:
+		result.Error = fmt.Errorf("expected the answer to stop at the output limit, got stop reason %q", result.StopReason)
+	}
+
+	return result
+}
+
+func outputLimitChange(response any) (llms.Warning, bool) {
+	contentResp, isContentResp := response.(*llms.ContentResponse)
+	if !isContentResp {
+		return llms.Warning{}, false
+	}
+	for _, warning := range contentResp.Warnings {
+		if warning.Option == "WithMaxTokens" {
+			return warning, true
+		}
+	}
+	return llms.Warning{}, false
+}
+
+// judgeRefusal builds the result for a call that either failed or was required to fail.
+func judgeRefusal(
+	tc cases.TestCase,
+	want cases.RefusalKind,
+	err error,
+	latency time.Duration,
+) cases.TestResult {
+	result := cases.TestResult{
+		ID:         tc.ID(),
+		Name:       tc.Name(),
+		Type:       tc.Type(),
+		Group:      tc.Group(),
+		Capability: tc.Capability(),
+		Latency:    latency,
+	}
+
+	switch got := cases.ClassifyRefusal(err); {
+	case want == cases.RefusalNone:
+		result.Unsupported = got.CountsAsUnsupported()
+		result.Success = got == cases.RefusalStructuredOutputUnsupported
+		result.Error = err
+		if cases.IsContentFilterError(err) {
+			result.ContentFiltered = true
+			result.Error = fmt.Errorf("the vendor's content filter declined the request: %w", err)
+		}
+	case err == nil:
+		result.Error = fmt.Errorf("expected the SDK to refuse with %q before calling the provider, got an answer", want)
+	case got == want:
+		result.Success = true
+	default:
+		result.Error = fmt.Errorf("expected the SDK to refuse with %q, got: %w", want, err)
+	}
+
+	return result
 }
 
 // groupResults organizes test results by agent type
 func groupResults(responses []testResponse) ProviderTestResults {
-	resultMap := make(map[pconfig.ProviderOptionsType][]testdata.TestResult)
+	resultMap := make(map[pconfig.ProviderOptionsType][]cases.TestResult)
 
 	// group by agent type
 	for _, resp := range responses {
 		if resp.err != nil {
 			// create error result
-			errorResult := testdata.TestResult{
+			errorResult := cases.TestResult{
 				ID:      "error",
 				Name:    fmt.Sprintf("Execution Error: %v", resp.err),
 				Success: false,
@@ -262,13 +452,19 @@ func groupResults(responses []testResponse) ProviderTestResults {
 }
 
 // isTestCompatibleWithAgent determines if a test type is compatible with an agent type
-func isTestCompatibleWithAgent(testType testdata.TestType, agentType pconfig.ProviderOptionsType) bool {
+func isTestCompatibleWithAgent(testType cases.TestType, agentType pconfig.ProviderOptionsType) bool {
 	switch agentType {
 	case pconfig.OptionsTypeSimpleJSON:
 		// simpleJSON agent only handles JSON tests
-		return testType == testdata.TestTypeJSON
+		return testType == cases.TestTypeJSON
 	default:
-		// all other agents handle everything except JSON tests
-		return testType != testdata.TestTypeJSON
+		switch testType {
+		case cases.TestTypeJSON:
+			return false
+		case cases.TestTypeTool, cases.TestTypeFileEdit:
+			return agentType.UsesTools()
+		default:
+			return true
+		}
 	}
 }

@@ -3,11 +3,12 @@ import { toast } from 'sonner';
 
 import type { FileNode } from '@/components/shared/file-manager';
 
+import { pluralizeItems } from '@/components/shared/file-manager';
 import { buildPathsQuery } from '@/features/resources/resources-utils';
 import { api, getApiErrorMessage } from '@/lib/axios';
 
 import { FLOW_FILES_API_PATH } from './flow-files-constants';
-import { type FlowFilesResponse, pluralizeItems } from './flow-files-utils';
+import { type FlowFilesResponse } from './flow-files-utils';
 
 interface UseFlowFilesDeleteParams {
     flowId: null | string;
@@ -78,8 +79,8 @@ export function useFlowFilesDelete({ flowId, onAfterDelete }: UseFlowFilesDelete
                 );
 
                 if (filesToDelete.length === 1) {
-                    const single = filesToDelete[0];
-                    toast.success(single.isDir ? 'Directory deleted' : 'File deleted');
+                    const [single] = filesToDelete;
+                    toast.success(single?.isDir ? 'Directory deleted' : 'File deleted');
                 } else {
                     toast.success(`${filesToDelete.length} ${pluralizeItems(filesToDelete.length)} deleted`);
                 }

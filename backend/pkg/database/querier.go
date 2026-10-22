@@ -11,6 +11,17 @@ import (
 
 type Querier interface {
 	AddFavoriteFlow(ctx context.Context, arg AddFavoriteFlowParams) (UserPreference, error)
+	CountAPITokens(ctx context.Context) (int64, error)
+	CountActiveFlows(ctx context.Context) (int64, error)
+	CountAssistants(ctx context.Context) (int64, error)
+	CountContainers(ctx context.Context) (int64, error)
+	CountFlowTemplates(ctx context.Context) (int64, error)
+	CountFlows(ctx context.Context) (int64, error)
+	CountPrompts(ctx context.Context) (int64, error)
+	CountSubtasks(ctx context.Context) (int64, error)
+	CountTasks(ctx context.Context) (int64, error)
+	CountToolcalls(ctx context.Context) (int64, error)
+	CountUsers(ctx context.Context) (int64, error)
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
 	CreateAgentLog(ctx context.Context, arg CreateAgentLogParams) (Agentlog, error)
 	CreateAssistant(ctx context.Context, arg CreateAssistantParams) (Assistant, error)
@@ -57,6 +68,12 @@ type Querier interface {
 	DeleteUserKnowledgeDocument(ctx context.Context, arg DeleteUserKnowledgeDocumentParams) error
 	DeleteUserPreferences(ctx context.Context, userID int64) error
 	DeleteUserPrompt(ctx context.Context, arg DeleteUserPromptParams) error
+	// deleted_at IS NULL is load-bearing, not just hygiene: without it a replayed
+	// delete of an already-deleted id still succeeds and still returns the row, and
+	// the caller then resets every flow/assistant matching that name — which by
+	// then may belong to a *different*, live provider reusing the freed name
+	// (providers_name_user_id_unique is partial on deleted_at IS NULL). Mirrors the
+	// guard GetUserProvider already applies on the rename path.
 	DeleteUserProvider(ctx context.Context, arg DeleteUserProviderParams) (Provider, error)
 	GetAPIToken(ctx context.Context, id int64) (ApiToken, error)
 	GetAPITokenByTokenID(ctx context.Context, tokenID string) (ApiToken, error)
@@ -111,18 +128,10 @@ type Querier interface {
 	GetFlowVectorStoreLog(ctx context.Context, arg GetFlowVectorStoreLogParams) (Vecstorelog, error)
 	GetFlowVectorStoreLogs(ctx context.Context, flowID int64) ([]Vecstorelog, error)
 	GetFlows(ctx context.Context) ([]Flow, error)
-	// Get flow IDs created in the last 3 months for analytics
-	GetFlowsForPeriodLast3Months(ctx context.Context, userID int64) ([]GetFlowsForPeriodLast3MonthsRow, error)
-	// Get flow IDs created in the last month for analytics
-	GetFlowsForPeriodLastMonth(ctx context.Context, userID int64) ([]GetFlowsForPeriodLastMonthRow, error)
-	// Get flow IDs created in the last week for analytics
-	GetFlowsForPeriodLastWeek(ctx context.Context, userID int64) ([]GetFlowsForPeriodLastWeekRow, error)
-	// Get flows stats by day for the last 3 months
-	GetFlowsStatsByDayLast3Months(ctx context.Context, userID int64) ([]GetFlowsStatsByDayLast3MonthsRow, error)
-	// Get flows stats by day for the last month
-	GetFlowsStatsByDayLastMonth(ctx context.Context, userID int64) ([]GetFlowsStatsByDayLastMonthRow, error)
-	// Get flows stats by day for the last week
-	GetFlowsStatsByDayLastWeek(ctx context.Context, userID int64) ([]GetFlowsStatsByDayLastWeekRow, error)
+	// Flows created within the last N whole calendar days in the caller's timezone.
+	GetFlowsForPeriod(ctx context.Context, arg GetFlowsForPeriodParams) ([]GetFlowsForPeriodRow, error)
+	// One dense row per calendar day in the caller's timezone, zeros included.
+	GetFlowsStatsByDay(ctx context.Context, arg GetFlowsStatsByDayParams) ([]GetFlowsStatsByDayRow, error)
 	// Fetch a single knowledge document by its UUID (admin view — no user_id check).
 	GetKnowledgeDocument(ctx context.Context, uuid string) (GetKnowledgeDocumentRow, error)
 	GetMsgChain(ctx context.Context, id int64) (Msgchain, error)
@@ -153,6 +162,11 @@ type Querier interface {
 	GetSubtaskVectorStoreLogs(ctx context.Context, subtaskID sql.NullInt64) ([]Vecstorelog, error)
 	// Get all subtasks for multiple tasks
 	GetSubtasksForTasks(ctx context.Context, taskIds []int64) ([]GetSubtasksForTasksRow, error)
+	// Number of configured providers per type, for the instance summary.
+	GetSummaryProviderCounts(ctx context.Context) ([]GetSummaryProviderCountsRow, error)
+	// Aggregate LLM usage per provider type, over the whole life of the instance,
+	// for the instance summary.
+	GetSummaryUsageByProvider(ctx context.Context) ([]GetSummaryUsageByProviderRow, error)
 	GetTask(ctx context.Context, id int64) (Task, error)
 	GetTaskAgentLogs(ctx context.Context, taskID sql.NullInt64) ([]Agentlog, error)
 	GetTaskCompletedSubtasks(ctx context.Context, taskID int64) ([]Subtask, error)
@@ -175,19 +189,14 @@ type Querier interface {
 	GetTermLog(ctx context.Context, id int64) (Termlog, error)
 	// Get all toolcalls for a flow
 	GetToolcallsForFlow(ctx context.Context, flowID int64) ([]GetToolcallsForFlowRow, error)
-	// Get toolcalls stats by day for the last 3 months
-	GetToolcallsStatsByDayLast3Months(ctx context.Context, userID int64) ([]GetToolcallsStatsByDayLast3MonthsRow, error)
-	// Get toolcalls stats by day for the last month
-	GetToolcallsStatsByDayLastMonth(ctx context.Context, userID int64) ([]GetToolcallsStatsByDayLastMonthRow, error)
-	// Get toolcalls stats by day for the last week
-	GetToolcallsStatsByDayLastWeek(ctx context.Context, userID int64) ([]GetToolcallsStatsByDayLastWeekRow, error)
+	// One dense row per calendar day in the caller's timezone, zeros included.
+	GetToolcallsStatsByDay(ctx context.Context, arg GetToolcallsStatsByDayParams) ([]GetToolcallsStatsByDayRow, error)
 	// Get toolcalls stats grouped by function name for a user
 	GetToolcallsStatsByFunction(ctx context.Context, userID int64) ([]GetToolcallsStatsByFunctionRow, error)
 	// Get toolcalls stats grouped by function name for a specific flow
 	GetToolcallsStatsByFunctionForFlow(ctx context.Context, flowID int64) ([]GetToolcallsStatsByFunctionForFlowRow, error)
-	GetUsageStatsByDayLast3Months(ctx context.Context, userID int64) ([]GetUsageStatsByDayLast3MonthsRow, error)
-	GetUsageStatsByDayLastMonth(ctx context.Context, userID int64) ([]GetUsageStatsByDayLastMonthRow, error)
-	GetUsageStatsByDayLastWeek(ctx context.Context, userID int64) ([]GetUsageStatsByDayLastWeekRow, error)
+	// One dense row per calendar day in the caller's timezone, zeros included.
+	GetUsageStatsByDay(ctx context.Context, arg GetUsageStatsByDayParams) ([]GetUsageStatsByDayRow, error)
 	GetUsageStatsByModel(ctx context.Context, userID int64) ([]GetUsageStatsByModelRow, error)
 	GetUsageStatsByModelAgentsForFlow(ctx context.Context, flowID int64) ([]GetUsageStatsByModelAgentsForFlowRow, error)
 	GetUsageStatsByProvider(ctx context.Context, userID int64) ([]GetUsageStatsByProviderRow, error)
@@ -247,6 +256,8 @@ type Querier interface {
 	ListFlowKnowledgeDocuments(ctx context.Context, flowID sql.NullString) ([]ListFlowKnowledgeDocumentsRow, error)
 	// List all non-memory knowledge documents owned by a specific user (user-scoped view).
 	ListUserKnowledgeDocuments(ctx context.Context, userID sql.NullString) ([]ListUserKnowledgeDocumentsRow, error)
+	SaveAssistantLog(ctx context.Context, arg SaveAssistantLogParams) error
+	SaveAssistantLogContent(ctx context.Context, arg SaveAssistantLogContentParams) error
 	// Vector similarity search over all knowledge documents (admin view, no user filter).
 	// Returns rows ordered by cosine similarity descending (highest score first).
 	// embedding    query vector as a PostgreSQL vector literal, e.g. '[0.1,0.2,...]'
@@ -272,6 +283,12 @@ type Querier interface {
 	UpdateAssistantTitle(ctx context.Context, arg UpdateAssistantTitleParams) (Assistant, error)
 	UpdateAssistantToolCallIDTemplate(ctx context.Context, arg UpdateAssistantToolCallIDTemplateParams) (Assistant, error)
 	UpdateAssistantUseAgents(ctx context.Context, arg UpdateAssistantUseAgentsParams) (Assistant, error)
+	// The assistants counterpart of UpdateFlowsProviderNameByOldName. Assistants
+	// carry their own provider reference, independent of their flow's, and the
+	// table has no user_id — ownership is derived by joining through flows, so the
+	// statement can never cross a tenant boundary. Idempotent for the same reason:
+	// a rewritten row no longer matches old_name.
+	UpdateAssistantsProviderNameByOldName(ctx context.Context, arg UpdateAssistantsProviderNameByOldNameParams) ([]Assistant, error)
 	UpdateContainerImage(ctx context.Context, arg UpdateContainerImageParams) (Container, error)
 	UpdateContainerStatus(ctx context.Context, arg UpdateContainerStatusParams) (Container, error)
 	UpdateContainerStatusLocalID(ctx context.Context, arg UpdateContainerStatusLocalIDParams) (Container, error)
@@ -282,10 +299,21 @@ type Querier interface {
 	UpdateFlowTemplate(ctx context.Context, arg UpdateFlowTemplateParams) (FlowTemplate, error)
 	UpdateFlowTitle(ctx context.Context, arg UpdateFlowTitleParams) (Flow, error)
 	UpdateFlowToolCallIDTemplate(ctx context.Context, arg UpdateFlowToolCallIDTemplateParams) (Flow, error)
+	// Bulk-renames every flow row of a user still pointing at a provider's old name
+	// (the user renamed a custom LLM provider, or deleted one and the reference is
+	// reset to the built-in name of its type). Matching on old_name makes the
+	// statement idempotent: once rewritten, a row no longer matches, so it is safe
+	// to call unconditionally and to retry.
+	UpdateFlowsProviderNameByOldName(ctx context.Context, arg UpdateFlowsProviderNameByOldNameParams) ([]Flow, error)
 	// Update an existing document's embedding, text and metadata atomically.
 	// embedding must be formatted as a PostgreSQL vector literal: '[f1,f2,...]'
 	// cmetadata must be valid JSON text.
 	UpdateKnowledgeDocument(ctx context.Context, arg UpdateKnowledgeDocumentParams) (UpdateKnowledgeDocumentRow, error)
+	// Update only the document's metadata, leaving its text and embedding intact.
+	// Used when an update changes no content (e.g. rename) so re-embedding — and
+	// therefore a configured embedder — is unnecessary.
+	// cmetadata must be valid JSON text.
+	UpdateKnowledgeDocumentMetadata(ctx context.Context, arg UpdateKnowledgeDocumentMetadataParams) (UpdateKnowledgeDocumentMetadataRow, error)
 	UpdateMsgChain(ctx context.Context, arg UpdateMsgChainParams) (Msgchain, error)
 	UpdateMsgChainUsage(ctx context.Context, arg UpdateMsgChainUsageParams) (Msgchain, error)
 	UpdateMsgLogResult(ctx context.Context, arg UpdateMsgLogResultParams) (Msglog, error)

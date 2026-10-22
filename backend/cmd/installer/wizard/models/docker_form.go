@@ -49,6 +49,12 @@ func (m *DockerFormModel) BuildForm() tea.Cmd {
 		config.DockerNetAdmin,
 	))
 
+	fields = append(fields, m.createBooleanField("docker_inside_policy_tests",
+		locale.ToolsDockerInsidePolicyTests,
+		locale.ToolsDockerInsidePolicyTestsDesc,
+		config.DockerInsidePolicyTests,
+	))
+
 	// Connection settings
 	fields = append(fields, m.createTextField("docker_socket",
 		locale.ToolsDockerSocket,
@@ -94,6 +100,27 @@ func (m *DockerFormModel) BuildForm() tea.Cmd {
 		false,
 	))
 
+	fields = append(fields, m.createTextField("docker_default_image_for_test",
+		locale.ToolsDockerDefaultImageForTest,
+		locale.ToolsDockerDefaultImageForTestDesc,
+		config.DockerDefaultImageForTest,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("docker_image_selection_mode",
+		locale.ToolsDockerImageSelectionMode,
+		locale.ToolsDockerImageSelectionModeDesc,
+		config.DockerImageSelectionMode,
+		false,
+	))
+
+	fields = append(fields, m.createTextField("docker_allowed_images",
+		locale.ToolsDockerAllowedImages,
+		locale.ToolsDockerAllowedImagesDesc,
+		config.DockerAllowedImages,
+		false,
+	))
+
 	// TLS connection settings (optional)
 	fields = append(fields, m.createTextField("docker_host",
 		locale.ToolsDockerHost,
@@ -112,6 +139,28 @@ func (m *DockerFormModel) BuildForm() tea.Cmd {
 		locale.ToolsDockerCertPath,
 		locale.ToolsDockerCertPathDesc,
 		config.HostDockerCertPath,
+		false,
+	))
+
+	// Daemon endpoint exposed to worker containers (only used when Docker Access
+	// is enabled). Mirrors the trio above, but describes the sandbox's view.
+	fields = append(fields, m.createTextField("docker_inside_host",
+		locale.ToolsDockerInsideHost,
+		locale.ToolsDockerInsideHostDesc,
+		config.DockerInsideHost,
+		false,
+	))
+
+	fields = append(fields, m.createBooleanField("docker_inside_tls_verify",
+		locale.ToolsDockerInsideTLSVerify,
+		locale.ToolsDockerInsideTLSVerifyDesc,
+		config.DockerInsideTLSVerify,
+	))
+
+	fields = append(fields, m.createTextField("docker_inside_cert_path",
+		locale.ToolsDockerInsideCertPath,
+		locale.ToolsDockerInsideCertPathDesc,
+		config.DockerInsideCertPath,
 		false,
 	))
 
@@ -251,6 +300,17 @@ func (m *DockerFormModel) GetCurrentConfiguration() string {
 			m.GetStyles().Success.Render(locale.StatusConfigured)))
 	}
 
+	// Worker daemon endpoint — only meaningful when Docker Access is enabled.
+	if dockerInside == "true" {
+		if config.DockerInsideHost.Value != "" {
+			sections = append(sections, fmt.Sprintf("• Worker Docker Daemon: %s",
+				m.GetStyles().Success.Render(locale.StatusConfigured)))
+		} else {
+			sections = append(sections, fmt.Sprintf("• Worker Docker Daemon: %s",
+				m.GetStyles().Warning.Render(locale.StatusNotConfigured)))
+		}
+	}
+
 	sections = append(sections, "")
 	if config.Configured {
 		sections = append(sections, m.GetStyles().Success.Render(locale.MessageDockerConfigured))
@@ -287,6 +347,8 @@ func (m *DockerFormModel) GetHelpContent() string {
 			sections = append(sections, locale.ToolsDockerInsideHelp)
 		case "docker_net_admin":
 			sections = append(sections, locale.ToolsDockerNetAdminHelp)
+		case "docker_inside_policy_tests":
+			sections = append(sections, locale.ToolsDockerInsidePolicyTestsHelp)
 		case "docker_socket":
 			sections = append(sections, locale.ToolsDockerSocketHelp)
 		case "docker_network":
@@ -299,12 +361,24 @@ func (m *DockerFormModel) GetHelpContent() string {
 			sections = append(sections, locale.ToolsDockerDefaultImageHelp)
 		case "docker_default_image_for_pentest":
 			sections = append(sections, locale.ToolsDockerDefaultImageForPentestHelp)
+		case "docker_default_image_for_test":
+			sections = append(sections, locale.ToolsDockerDefaultImageForTestHelp)
+		case "docker_image_selection_mode":
+			sections = append(sections, locale.ToolsDockerImageSelectionModeHelp)
+		case "docker_allowed_images":
+			sections = append(sections, locale.ToolsDockerAllowedImagesHelp)
 		case "docker_host":
 			sections = append(sections, locale.ToolsDockerHostHelp)
 		case "docker_tls_verify":
 			sections = append(sections, locale.ToolsDockerTLSVerifyHelp)
 		case "docker_cert_path":
 			sections = append(sections, locale.ToolsDockerCertPathHelp)
+		case "docker_inside_host":
+			sections = append(sections, locale.ToolsDockerInsideHostHelp)
+		case "docker_inside_tls_verify":
+			sections = append(sections, locale.ToolsDockerInsideTLSVerifyHelp)
+		case "docker_inside_cert_path":
+			sections = append(sections, locale.ToolsDockerInsideCertPathHelp)
 		default:
 			sections = append(sections, locale.ToolsDockerFormOverview)
 		}
@@ -328,9 +402,16 @@ func (m *DockerFormModel) HandleSave() error {
 		DockerWorkDir:                config.DockerWorkDir,
 		DockerDefaultImage:           config.DockerDefaultImage,
 		DockerDefaultImageForPentest: config.DockerDefaultImageForPentest,
+		DockerDefaultImageForTest:    config.DockerDefaultImageForTest,
+		DockerImageSelectionMode:     config.DockerImageSelectionMode,
+		DockerAllowedImages:          config.DockerAllowedImages,
+		DockerInsidePolicyTests:      config.DockerInsidePolicyTests,
 		DockerHost:                   config.DockerHost,
 		DockerTLSVerify:              config.DockerTLSVerify,
 		HostDockerCertPath:           config.HostDockerCertPath,
+		DockerInsideHost:             config.DockerInsideHost,
+		DockerInsideTLSVerify:        config.DockerInsideTLSVerify,
+		DockerInsideCertPath:         config.DockerInsideCertPath,
 	}
 
 	// update field values based on form input
@@ -350,6 +431,12 @@ func (m *DockerFormModel) HandleSave() error {
 				return fmt.Errorf("invalid boolean value for Network Admin: %s (must be 'true' or 'false')", value)
 			}
 			newConfig.DockerNetAdmin.Value = value
+		case "docker_inside_policy_tests":
+			// validate boolean input
+			if value != "" && value != "true" && value != "false" {
+				return fmt.Errorf("invalid boolean value for Sandbox Isolation Self-Test: %s (must be 'true' or 'false')", value)
+			}
+			newConfig.DockerInsidePolicyTests.Value = value
 		case "docker_socket":
 			newConfig.DockerSocket.Value = value
 		case "docker_network":
@@ -362,6 +449,16 @@ func (m *DockerFormModel) HandleSave() error {
 			newConfig.DockerDefaultImage.Value = value
 		case "docker_default_image_for_pentest":
 			newConfig.DockerDefaultImageForPentest.Value = value
+		case "docker_default_image_for_test":
+			newConfig.DockerDefaultImageForTest.Value = value
+		case "docker_image_selection_mode":
+			// two modes the runtime understands; empty falls back to the "llm" default
+			if value != "" && value != "llm" && value != "fixed" {
+				return fmt.Errorf("invalid image selection mode: %s (must be 'llm' or 'fixed')", value)
+			}
+			newConfig.DockerImageSelectionMode.Value = value
+		case "docker_allowed_images":
+			newConfig.DockerAllowedImages.Value = value
 		case "docker_host":
 			newConfig.DockerHost.Value = value
 		case "docker_tls_verify":
@@ -392,6 +489,30 @@ func (m *DockerFormModel) HandleSave() error {
 				}
 			}
 			newConfig.HostDockerCertPath.Value = value
+		case "docker_inside_host":
+			// Accept any daemon endpoint scheme docker understands; an unreachable
+			// endpoint is an operational matter, not a form-level error.
+			if value != "" && !strings.Contains(value, "://") {
+				return fmt.Errorf("invalid worker docker host: %s (expected a scheme, e.g. tcp://host:2376 or unix:///var/run/docker.sock)", value)
+			}
+			newConfig.DockerInsideHost.Value = value
+		case "docker_inside_tls_verify":
+			if value != "" && value != "true" && value != "false" && value != "1" && value != "0" {
+				return fmt.Errorf("invalid boolean value for Worker Docker TLS Verify: %s (must be 'true', 'false', '1', or '0')", value)
+			}
+			// normalize to docker's own convention: "1" enables, empty disables
+			switch value {
+			case "true":
+				value = "1"
+			case "false":
+				value = ""
+			}
+			newConfig.DockerInsideTLSVerify.Value = value
+		case "docker_inside_cert_path":
+			// Deliberately NOT stat'd: this path is resolved on the worker node
+			// whose daemon creates sandboxes, which may be a different machine from
+			// the one running this installer.
+			newConfig.DockerInsideCertPath.Value = value
 		}
 	}
 
@@ -418,11 +539,11 @@ func (m *DockerFormModel) OnFieldChanged(fieldIndex int, oldValue, newValue stri
 }
 
 func (m *DockerFormModel) GetFormFields() []FormField {
-	return m.BaseScreen.fields
+	return m.fields
 }
 
 func (m *DockerFormModel) SetFormFields(fields []FormField) {
-	m.BaseScreen.fields = fields
+	m.fields = fields
 }
 
 // Update method - handle screen-specific input

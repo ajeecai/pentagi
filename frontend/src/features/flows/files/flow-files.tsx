@@ -1,4 +1,4 @@
-import { ArrowDownToLine, FolderInput, FolderOutput, FolderUp, Loader2, Search, Upload, X } from 'lucide-react';
+import { ArrowDownToLine, FolderInput, FolderOutput, FolderUp, Search, Upload, X } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -15,22 +15,24 @@ import {
     type FileManagerAction,
     type FileManagerBulkAction,
     type FileNode,
+    pluralizeItems,
 } from '@/components/shared/file-manager';
 import { Button } from '@/components/ui/button';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Form, FormControl, FormField, FormItem } from '@/components/ui/form';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
+import { Spinner } from '@/components/ui/spinner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { StatusType } from '@/graphql/types';
 import { useFilesDragAndDrop } from '@/hooks/use-files-drag-and-drop';
-import { copyToClipboard } from '@/lib/report';
+import { copyToClipboard } from '@/lib/clipboard';
 import { useFlow } from '@/providers/flow-provider';
 
 import { FlowFilesAttachResourcesDialog } from './flow-files-attach-resources-dialog';
 import { ROOT_GROUPS } from './flow-files-constants';
 import { FlowFilesPromoteDialog } from './flow-files-promote-dialog';
 import { FlowFilesPullDialog } from './flow-files-pull-dialog';
-import { buildFlowFilesDownloadHref, pluralizeItems } from './flow-files-utils';
+import { buildFlowFilesDownloadHref } from './flow-files-utils';
 import { useFlowFilesData } from './use-flow-files-data';
 import { useFlowFilesDelete } from './use-flow-files-delete';
 import { useFlowFilesRealtime } from './use-flow-files-realtime';
@@ -41,8 +43,6 @@ function FlowFiles() {
     const { flowId, flowStatus } = useFlow();
     const [isPullDialogOpen, setIsPullDialogOpen] = useState(false);
     const [isAttachResourcesDialogOpen, setIsAttachResourcesDialogOpen] = useState(false);
-    // Array now: row-action click pushes a single-element array, the bulk bar
-    // pushes the deduped selection. Empty array / null closes the dialog.
     const [filesToPromote, setFilesToPromote] = useState<FileNode[] | null>(null);
 
     const { fileNodes, isInitialLoading, isLoading } = useFlowFilesData({ flowId });
@@ -75,9 +75,8 @@ function FlowFiles() {
     }, []);
 
     /**
-     * Bulk "copy paths" handler: join every selected file's path with `\n` so the
-     * user can paste a clean newline-separated list straight into the agent chat,
-     * a shell command, or a tool argument. Reports the count for clarity.
+     * Join the selected paths with `\n` so the result pastes as a clean
+     * newline-separated list into the agent chat, a shell command, or a tool argument.
      */
     const handleBulkCopyPaths = useCallback(async (paths: string[]) => {
         if (paths.length === 0) {
@@ -95,9 +94,8 @@ function FlowFiles() {
         toast.error('Failed to copy paths');
     }, []);
 
-    // Single-file row download specialises the bulk URL builder via a 1-element
-    // array. `flowId` may be missing (no flow selected yet) — return '' so
-    // FileManager renders a noop link instead of crashing on `null`.
+    // `flowId` may be missing (no flow selected yet) — return '' so FileManager
+    // renders a noop link instead of crashing on `null`.
     const getRowDownloadHref = useCallback(
         (file: FileNode): string => buildFlowFilesDownloadHref(flowId, [file]) ?? '',
         [flowId],
@@ -135,9 +133,6 @@ function FlowFiles() {
         [getRowDownloadHref, handleCopyPath, promoteAction, deletion.requestDelete],
     );
 
-    // Bulk-action set: primary "Save as resources" (most common workflow on this
-    // page — promote interesting artifacts into the global library), copy-paths
-    // in overflow, destructive Delete on the right.
     const fileManagerBulkActions = useMemo<FileManagerBulkAction[]>(
         () => [
             bulkDownloadAction(getBulkDownloadHref),
@@ -210,7 +205,7 @@ function FlowFiles() {
 
             {isDragging && (
                 <div className="bg-primary/10 border-primary pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed">
-                    <div className="text-primary flex flex-col items-center gap-2">
+                    <div className="text-link flex flex-col items-center gap-2">
                         <FolderUp className="size-8" />
                         <span className="text-sm font-medium">Drop files to upload</span>
                     </div>
@@ -239,6 +234,7 @@ function FlowFiles() {
                                             {field.value && (
                                                 <InputGroupAddon align="inline-end">
                                                     <InputGroupButton
+                                                        aria-label="Clear file search"
                                                         onClick={search.resetSearch}
                                                         type="button"
                                                     >
@@ -256,13 +252,14 @@ function FlowFiles() {
                             <TooltipTrigger asChild>
                                 <span>
                                     <Button
+                                        aria-label="Upload files"
                                         disabled={upload.isUploading || isLoading}
                                         onClick={upload.openFilePicker}
                                         size="icon-sm"
                                         type="button"
                                         variant="outline"
                                     >
-                                        {upload.isUploading ? <Loader2 className="animate-spin" /> : <Upload />}
+                                        {upload.isUploading ? <Spinner variant="circle" /> : <Upload />}
                                     </Button>
                                 </span>
                             </TooltipTrigger>
@@ -278,6 +275,7 @@ function FlowFiles() {
                             <TooltipTrigger asChild>
                                 <span>
                                     <Button
+                                        aria-label="Attach resources"
                                         disabled={isAttachResourcesDisabled}
                                         onClick={handleOpenAttachResourcesDialog}
                                         size="icon-sm"
@@ -301,6 +299,7 @@ function FlowFiles() {
                             <TooltipTrigger asChild>
                                 <span>
                                     <Button
+                                        aria-label="Pull from container"
                                         disabled={isPullDisabled}
                                         onClick={handleOpenPullDialog}
                                         size="icon-sm"

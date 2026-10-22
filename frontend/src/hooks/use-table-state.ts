@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useDebounce } from 'use-debounce';
 
-import { URL_PARAMS } from '@/lib/url-params';
+import { getLatestSearchParams, URL_PARAMS } from '@/lib/url-params';
 
 interface SetPageOptions {
     /**
@@ -67,18 +67,13 @@ interface UseTableStateResult {
  * columns) still persist via `lib/table-state` — only the ad-hoc query is
  * URL-only.
  *
- * Replaces the split `useTableQueryFilter` / `usePagination` pair. The split
- * design suffered from a batching race: react-router v6 feeds every
- * functional `setSearchParams(updater)` queued in a single tick the same
- * pre-batch snapshot, so a `setFilter` + `setPage` pair (e.g. a debounced
- * filter commit landing alongside a paging click) would collapse — the
- * second write erased the first and `q` was lost. Funnelling every URL
- * write through a single `update` here removes the race by construction:
- * there is never more than one in-flight `setSearchParams` per logical
- * intent. The few cases where two intents still fire in the same tick
- * (e.g. an external effect mutating the URL while we batch our own write)
- * read the freshest URL via `window.location.search`, with a ref-stashed
- * react-router snapshot as the fallback for `MemoryRouter`-based tests.
+ * All URL writes funnel through a single `update` to dodge a react-router v6
+ * batching race: every functional `setSearchParams(updater)` queued in one tick
+ * gets the same pre-batch snapshot, so a `setFilter` + `setPage` pair firing
+ * together would collapse — the second write erasing the first, losing `q`.
+ * The rare two-intents-in-one-tick case (an external effect mutating the URL
+ * while we batch our own write) reads the freshest URL via `window.location.search`,
+ * with a ref-stashed react-router snapshot as the `MemoryRouter`-test fallback.
  *
  * Read-only siblings (detail pages reading the list's filter without
  * mutating it) should keep using `useTableQueryFilterReader` — no shared
@@ -119,21 +114,10 @@ export function useTableState(options: UseTableStateOptions = {}): UseTableState
     // eslint-disable-next-line react-hooks/refs
     searchParamsReference.current = searchParams;
 
-    /**
-     * Read the freshest possible `URLSearchParams` for the next write.
-     *
-     * Under `BrowserRouter` (production), `window.location.search` reflects
-     * the URL bar one frame ahead of react-router's internal snapshot when
-     * batched updates are in flight — that's the seam we exploit to merge
-     * multi-source URL mutations safely. Under `MemoryRouter` (tests)
-     * `window.location` doesn't track the in-memory history, so we fall
-     * back to the rendered react-router snapshot.
-     */
-    const readLatestParams = useCallback((): URLSearchParams => {
-        const fromWindow = typeof window !== 'undefined' ? window.location.search : '';
-
-        return fromWindow ? new URLSearchParams(fromWindow) : new URLSearchParams(searchParamsReference.current);
-    }, []);
+    const readLatestParams = useCallback(
+        (): URLSearchParams => getLatestSearchParams(searchParamsReference.current),
+        [],
+    );
 
     // Canonicalize `?<pageParamName>=1` away. The first page is the default
     // URL, so two URLs (`/flows` vs `/flows?page=1`) would otherwise denote
@@ -219,8 +203,6 @@ export function useTableState(options: UseTableStateOptions = {}): UseTableState
                 return;
             }
 
-            // Merge into the in-flight patch — the queued microtask will see
-            // the fused result.
             if (filterPresent) {
                 pendingPatchReference.current.filter = patch.filter;
                 pendingPatchReference.current.filterPresent = true;

@@ -1,14 +1,18 @@
 package pconfig
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/vxcontrol/langchaingo/llms"
 	"github.com/vxcontrol/langchaingo/llms/openai"
+	"github.com/vxcontrol/langchaingo/llms/reasoning"
 	"gopkg.in/yaml.v3"
 )
 
@@ -168,12 +172,45 @@ var AllAgentTypes = []ProviderOptionsType{
 	OptionsTypePentester,
 }
 
+func (opt ProviderOptionsType) UsesTools() bool {
+	switch opt {
+	case OptionsTypeSimpleJSON, OptionsTypeAdviser, OptionsTypeReflector:
+		return false
+	default:
+		return true
+	}
+}
+
+// A missing ContextWindow or MaxOutputTokens means "the vendor does not publish
+// it", never "unlimited": a consumer must keep its prior behaviour for such a model.
 type ModelConfig struct {
-	Name        string     `json:"name,omitempty" yaml:"name,omitempty"`
-	Description *string    `json:"description,omitempty" yaml:"description,omitempty"`
-	ReleaseDate *time.Time `json:"release_date,omitempty" yaml:"release_date,omitempty"`
-	Thinking    *bool      `json:"thinking,omitempty" yaml:"thinking,omitempty"`
-	Price       *PriceInfo `json:"price,omitempty" yaml:"price,omitempty"`
+	Name            string              `json:"name,omitempty" yaml:"name,omitempty"`
+	Description     *string             `json:"description,omitempty" yaml:"description,omitempty"`
+	ReleaseDate     *time.Time          `json:"release_date,omitempty" yaml:"release_date,omitempty"`
+	Thinking        *bool               `json:"thinking,omitempty" yaml:"thinking,omitempty"`
+	Reasoning       *ModelReasoningInfo `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
+	Price           *PriceInfo          `json:"price,omitempty" yaml:"price,omitempty"`
+	ContextWindow   *int                `json:"context_window,omitempty" yaml:"context_window,omitempty"`
+	MaxOutputTokens *int                `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
+}
+
+// ModelReasoningMode declares a model's reasoning capability. It is distinct from
+// the per-agent ReasoningConfig.Mode (the chosen mode): it is the source of truth
+// that lets a provider force the correct mode for models that require it.
+type ModelReasoningMode string
+
+const (
+	ModelReasoningNone         ModelReasoningMode = ""              // no extended thinking
+	ModelReasoningBudget       ModelReasoningMode = "budget"        // budget thinking only (older Claude)
+	ModelReasoningAdaptive     ModelReasoningMode = "adaptive"      // budget or adaptive (Opus 4.6, Sonnet 4.6)
+	ModelReasoningAdaptiveOnly ModelReasoningMode = "adaptive-only" // adaptive required; budget returns 400 (Opus 4.7/4.8)
+)
+
+// ModelReasoningInfo describes how a model supports extended thinking, so the
+// provider and UI can pick a valid mode/effort without hardcoding model names.
+type ModelReasoningInfo struct {
+	Mode    ModelReasoningMode     `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Efforts []llms.ReasoningEffort `json:"efforts,omitempty" yaml:"efforts,omitempty"`
 }
 
 type ModelsConfig []ModelConfig
@@ -185,9 +222,61 @@ type PriceInfo struct {
 	CacheWrite float64 `json:"cache_write,omitempty" yaml:"cache_write,omitempty"`
 }
 
+type ReasoningMode string
+
+const (
+	ReasoningModeDefault  ReasoningMode = ""
+	ReasoningModeAdaptive ReasoningMode = "adaptive"
+	ReasoningModeBudget   ReasoningMode = "budget"
+	// ReasoningModeOff explicitly disables thinking. It is distinct from Default:
+	// Default defers to the model (models like Gemini 2.5 / Claude Fable 5 think
+	// by default), while Off forces the provider's disable wire via langchaingo.
+	ReasoningModeOff ReasoningMode = "off"
+)
+
 type ReasoningConfig struct {
+	Mode      ReasoningMode        `json:"mode,omitempty" yaml:"mode,omitempty"`
 	Effort    llms.ReasoningEffort `json:"effort,omitempty" yaml:"effort,omitempty"`
 	MaxTokens int                  `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+}
+
+func (rc ReasoningConfig) IsZero() bool {
+	return rc.Mode == ReasoningModeDefault &&
+		rc.Effort == llms.ReasoningNone &&
+		rc.MaxTokens == 0
+}
+
+func (rc ReasoningConfig) EffectiveMode() ReasoningMode {
+	if rc.Mode != ReasoningModeDefault {
+		return rc.Mode
+	}
+	if rc.MaxTokens != 0 && (rc.Effort == llms.ReasoningNone || rc.Effort == llms.ReasoningEffort("none")) {
+		return ReasoningModeBudget
+	}
+	return ReasoningModeDefault
+}
+
+var forwardedEfforts = []llms.ReasoningEffort{
+	llms.ReasoningMinimal, llms.ReasoningLow, llms.ReasoningMedium, llms.ReasoningHigh, llms.ReasoningXHigh, llms.ReasoningMax,
+}
+
+func (rc ReasoningConfig) levelAsked() string {
+	switch rc.EffectiveMode() {
+	case ReasoningModeOff:
+	case ReasoningModeBudget:
+		if rc.MaxTokens > 0 {
+			return fmt.Sprintf("a reasoning budget of %d tokens", rc.MaxTokens)
+		}
+	case ReasoningModeAdaptive:
+		if rc.Effort != llms.ReasoningNone {
+			return fmt.Sprintf("reasoning effort %q", rc.Effort)
+		}
+	default:
+		if slices.Contains(forwardedEfforts, rc.Effort) {
+			return fmt.Sprintf("reasoning effort %q", rc.Effort)
+		}
+	}
+	return ""
 }
 
 // AgentConfig represents the configuration for a single agent
@@ -216,6 +305,7 @@ type AgentConfig struct {
 type ProviderConfig struct {
 	BaseURL        string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
 	APIKey         string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	Name           string            `json:"name,omitempty" yaml:"name,omitempty"`
 	Simple         *AgentConfig      `json:"simple,omitempty" yaml:"simple,omitempty"`
 	SimpleJSON     *AgentConfig      `json:"simple_json,omitempty" yaml:"simple_json,omitempty"`
 	PrimaryAgent   *AgentConfig      `json:"primary_agent,omitempty" yaml:"primary_agent,omitempty"`
@@ -231,6 +321,212 @@ type ProviderConfig struct {
 	Pentester      *AgentConfig      `json:"pentester,omitempty" yaml:"pentester,omitempty"`
 	defaultOptions []llms.CallOption `json:"-" yaml:"-"`
 	rawConfig      []byte            `json:"-" yaml:"-"`
+}
+
+// Validate rejects universally-invalid agent values (negatives where a value is
+// physically meaningless, an inverted length window, an out-of-range probability
+// or temperature, a reasoning budget over the engine cap). It stays permissive —
+// 0 means "unset", and provider-specific tuning ranges are the LLM API's job —
+// so it never rejects a valid provider-specific config.
+func (pc *ProviderConfig) Validate() error {
+	agents := map[string]*AgentConfig{
+		"simple": pc.Simple, "simple_json": pc.SimpleJSON, "primary_agent": pc.PrimaryAgent,
+		"assistant": pc.Assistant, "generator": pc.Generator, "refiner": pc.Refiner,
+		"adviser": pc.Adviser, "reflector": pc.Reflector, "searcher": pc.Searcher,
+		"enricher": pc.Enricher, "coder": pc.Coder, "installer": pc.Installer,
+		"pentester": pc.Pentester,
+	}
+	for name, ac := range agents {
+		if ac == nil {
+			continue
+		}
+		if err := ac.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func (pc *ProviderConfig) ValidateToolReasoning(rp reasoning.Provider) error {
+	if pc == nil || rp != reasoning.ProviderOpenAI {
+		return nil
+	}
+	for _, opt := range AllAgentTypes {
+		ac := pc.AgentConfigForType(opt)
+		if !opt.UsesTools() || ac == nil {
+			continue
+		}
+		level := ac.Reasoning.levelAsked()
+		if level == "" {
+			continue
+		}
+		if model := pc.effectiveModel(opt); reasoning.EffortWithTools(model) != reasoning.EffortToolsFree {
+			return fmt.Errorf("%s: model %q refuses %s on requests with function tools; clear it or turn reasoning off",
+				opt, model, level)
+		}
+	}
+	return nil
+}
+
+func (pc *ProviderConfig) ValidateReasoningOff(rp reasoning.Provider) error {
+	if pc == nil || rp == reasoning.ProviderUnknown {
+		return nil
+	}
+	for _, opt := range AllAgentTypes {
+		ac := pc.AgentConfigForType(opt)
+		if ac == nil || ac.Reasoning.EffectiveMode() != ReasoningModeOff {
+			continue
+		}
+		if model := pc.effectiveModel(opt); model != "" && reasoning.ResolveOff(model, rp) == reasoning.OffUnsupported {
+			return fmt.Errorf("%s: model %q cannot turn reasoning off; clear Reasoning Mode Off", opt, model)
+		}
+	}
+	return nil
+}
+
+func (pc *ProviderConfig) ValidateThinkingBudget(rp reasoning.Provider, prefix string) error {
+	if pc == nil || rp != reasoning.ProviderOpenAI {
+		return nil
+	}
+	for _, opt := range AllAgentTypes {
+		ac := pc.AgentConfigForType(opt)
+		if ac == nil || ac.Reasoning.EffectiveMode() != ReasoningModeBudget || ac.Reasoning.MaxTokens <= 0 {
+			continue
+		}
+		model := pc.effectiveModel(opt)
+		if model == "" {
+			continue
+		}
+		if prefix != "" {
+			model = prefix + "/" + model
+		}
+		if reasoning.TakesNoThinkingDepth(model) {
+			return fmt.Errorf("%s: model %q takes no thinking budget; clear Reasoning Max Tokens", opt, model)
+		}
+	}
+	return nil
+}
+
+func (ac *AgentConfig) Validate() error {
+	if ac.Model != "" && strings.TrimSpace(ac.Model) == "" {
+		return fmt.Errorf("model must not consist of whitespace only")
+	}
+	if ac.Temperature < 0 || ac.Temperature > 2 {
+		return fmt.Errorf("temperature %v out of range [0, 2]", ac.Temperature)
+	}
+	if ac.TopP < 0 || ac.TopP > 1 {
+		return fmt.Errorf("top_p %v out of range [0, 1]", ac.TopP)
+	}
+	if ac.TopK < 0 {
+		return fmt.Errorf("top_k %d must be >= 0", ac.TopK)
+	}
+	if ac.MaxTokens < 0 {
+		return fmt.Errorf("max_tokens %d must be >= 0", ac.MaxTokens)
+	}
+	if ac.MinLength < 0 {
+		return fmt.Errorf("min_length %d must be >= 0", ac.MinLength)
+	}
+	if ac.MaxLength < 0 {
+		return fmt.Errorf("max_length %d must be >= 0", ac.MaxLength)
+	}
+	if ac.MinLength > 0 && ac.MaxLength > 0 && ac.MinLength > ac.MaxLength {
+		return fmt.Errorf("min_length %d must not exceed max_length %d", ac.MinLength, ac.MaxLength)
+	}
+	if ac.RepetitionPenalty < 0 || ac.RepetitionPenalty > 2 {
+		return fmt.Errorf("repetition_penalty %v out of range [0, 2]", ac.RepetitionPenalty)
+	}
+	if ac.FrequencyPenalty < -2 || ac.FrequencyPenalty > 2 {
+		return fmt.Errorf("frequency_penalty %v out of range [-2, 2]", ac.FrequencyPenalty)
+	}
+	if ac.PresencePenalty < -2 || ac.PresencePenalty > 2 {
+		return fmt.Errorf("presence_penalty %v out of range [-2, 2]", ac.PresencePenalty)
+	}
+	if ac.Reasoning.MaxTokens < 0 || ac.Reasoning.MaxTokens > 32768 {
+		return fmt.Errorf("reasoning.max_tokens %d out of range [0, 32768]", ac.Reasoning.MaxTokens)
+	}
+	if ac.Reasoning.Mode == ReasoningModeBudget && ac.Reasoning.MaxTokens <= 0 {
+		return fmt.Errorf("reasoning.max_tokens is required when reasoning.mode is %q", ReasoningModeBudget)
+	}
+	if ac.Price != nil &&
+		(ac.Price.Input < 0 || ac.Price.Output < 0 || ac.Price.CacheRead < 0 || ac.Price.CacheWrite < 0) {
+		return fmt.Errorf("price values must be >= 0")
+	}
+	return nil
+}
+
+// ValidateThinkingAgreement rejects a config where an extra_body thinking toggle
+// contradicts the reasoning block. Only the openai door merges extra_body over its
+// own fields, where a toggle wins over the reasoning block on the wire: Reasoning
+// Mode Off would still send thinking, or a reasoning effort would still send a
+// disable. The other doors drop extra_body unread.
+func (pc *ProviderConfig) ValidateThinkingAgreement(rp reasoning.Provider) error {
+	if pc == nil || rp != reasoning.ProviderOpenAI {
+		return nil
+	}
+	for _, opt := range AllAgentTypes {
+		ac := pc.AgentConfigForType(opt)
+		if ac == nil {
+			continue
+		}
+		if err := ac.validateThinkingAgreement(); err != nil {
+			return fmt.Errorf("%s: %w", opt, err)
+		}
+	}
+	return nil
+}
+
+func (ac *AgentConfig) validateThinkingAgreement() error {
+	mode := ac.Reasoning.EffectiveMode()
+	reasoningOff := mode == ReasoningModeOff
+	reasoningOn := !reasoningOff && (mode == ReasoningModeAdaptive || mode == ReasoningModeBudget ||
+		slices.Contains(forwardedEfforts, ac.Reasoning.Effort))
+
+	extraOn, extraOff := extraBodyThinkingIntent(ac.ExtraBody)
+
+	switch {
+	case reasoningOff && extraOn:
+		return fmt.Errorf("extra_body enables thinking while reasoning.mode is %q; "+
+			"drop the extra_body thinking toggle or clear reasoning.mode", ReasoningModeOff)
+	case reasoningOn && extraOff:
+		return fmt.Errorf("extra_body disables thinking while the reasoning block requests it; " +
+			"drop the extra_body thinking toggle or turn reasoning off")
+	}
+	return nil
+}
+
+// extraBodyThinkingIntent reads a thinking decision out of every extra_body key
+// the openai door writes one under: enable_thinking, thinking.type,
+// reasoning_effort and reasoning.effort, where "none" is the disable level.
+func extraBodyThinkingIntent(extra map[string]any) (on, off bool) {
+	if extra == nil {
+		return
+	}
+	if v, ok := extra["enable_thinking"].(bool); ok {
+		on, off = v, !v
+	}
+	if th, ok := extra["thinking"].(map[string]any); ok {
+		if kind, typed := th["type"]; typed {
+			if kind == "disabled" {
+				off = true
+			} else {
+				on = true
+			}
+		}
+	}
+	levels := []any{extra["reasoning_effort"]}
+	if r, ok := extra["reasoning"].(map[string]any); ok {
+		levels = append(levels, r["effort"])
+	}
+	for _, level := range levels {
+		if level, ok := level.(string); ok && level != "" {
+			if level == reasoning.OpenAIDisableEffort {
+				off = true
+			} else {
+				on = true
+			}
+		}
+	}
+	return on, off
 }
 
 const EmptyProviderConfigRaw = `{
@@ -277,7 +573,7 @@ func LoadConfig(configPath string, defaultOptions []llms.CallOption) (*ProviderC
 	// handle backward compatibility with legacy config format
 	handleLegacyConfig(&config, data)
 
-	config.defaultOptions = defaultOptions
+	config.SetDefaultOptions(defaultOptions)
 	config.rawConfig = data
 
 	return &config, nil
@@ -295,7 +591,7 @@ func LoadConfigData(configData []byte, defaultOptions []llms.CallOption) (*Provi
 	// handle backward compatibility with legacy config format
 	handleLegacyConfig(&config, configData)
 
-	config.defaultOptions = defaultOptions
+	config.SetDefaultOptions(defaultOptions)
 	config.rawConfig = configData
 
 	return &config, nil
@@ -312,13 +608,24 @@ func LoadModelsConfigData(configData []byte) (ModelsConfig, error) {
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for ModelConfig
+func modelLimit(raw map[string]any, key string) *int {
+	switch v := raw[key].(type) {
+	case float64:
+		n := int(v)
+		return &n
+	case int:
+		return &v
+	}
+
+	return nil
+}
+
 func (mc *ModelConfig) UnmarshalJSON(data []byte) error {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 
-	// Parse each field manually
 	if name, ok := raw["name"].(string); ok {
 		mc.Name = name
 	}
@@ -351,6 +658,21 @@ func (mc *ModelConfig) UnmarshalJSON(data []byte) error {
 		mc.Price = &price
 	}
 
+	if reasoningData, ok := raw["reasoning"]; ok && reasoningData != nil {
+		reasoningBytes, err := json.Marshal(reasoningData)
+		if err != nil {
+			return err
+		}
+		var reasoning ModelReasoningInfo
+		if err := json.Unmarshal(reasoningBytes, &reasoning); err != nil {
+			return err
+		}
+		mc.Reasoning = &reasoning
+	}
+
+	mc.ContextWindow = modelLimit(raw, "context_window")
+	mc.MaxOutputTokens = modelLimit(raw, "max_output_tokens")
+
 	return nil
 }
 
@@ -361,7 +683,6 @@ func (mc *ModelConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	// Parse each field manually
 	if name, ok := raw["name"].(string); ok {
 		mc.Name = name
 	}
@@ -403,6 +724,21 @@ func (mc *ModelConfig) UnmarshalYAML(value *yaml.Node) error {
 		mc.Price = &price
 	}
 
+	if reasoningData, ok := raw["reasoning"]; ok && reasoningData != nil {
+		reasoningBytes, err := yaml.Marshal(reasoningData)
+		if err != nil {
+			return err
+		}
+		var reasoning ModelReasoningInfo
+		if err := yaml.Unmarshal(reasoningBytes, &reasoning); err != nil {
+			return err
+		}
+		mc.Reasoning = &reasoning
+	}
+
+	mc.ContextWindow = modelLimit(raw, "context_window")
+	mc.MaxOutputTokens = modelLimit(raw, "max_output_tokens")
+
 	return nil
 }
 
@@ -424,6 +760,15 @@ func (mc ModelConfig) MarshalJSON() ([]byte, error) {
 	}
 	if mc.Price != nil {
 		aux["price"] = mc.Price
+	}
+	if mc.Reasoning != nil {
+		aux["reasoning"] = mc.Reasoning
+	}
+	if mc.ContextWindow != nil {
+		aux["context_window"] = *mc.ContextWindow
+	}
+	if mc.MaxOutputTokens != nil {
+		aux["max_output_tokens"] = *mc.MaxOutputTokens
 	}
 
 	return json.Marshal(aux)
@@ -447,6 +792,15 @@ func (mc ModelConfig) MarshalYAML() (any, error) {
 	}
 	if mc.Price != nil {
 		aux["price"] = mc.Price
+	}
+	if mc.Reasoning != nil {
+		aux["reasoning"] = mc.Reasoning
+	}
+	if mc.ContextWindow != nil {
+		aux["context_window"] = *mc.ContextWindow
+	}
+	if mc.MaxOutputTokens != nil {
+		aux["max_output_tokens"] = *mc.MaxOutputTokens
 	}
 
 	return aux, nil
@@ -499,7 +853,20 @@ func (ac *AgentConfig) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	ac.raw = raw
+	ac.normaliseModel()
+
 	return nil
+}
+
+// IsSet reports whether the decoded config carried this key, whatever its value.
+func (ac *AgentConfig) IsSet(key string) bool {
+	if ac == nil || ac.raw == nil {
+		return false
+	}
+
+	_, ok := ac.raw[key]
+
+	return ok
 }
 
 // ClearRaw clears the raw map, forcing marshal to use struct field values
@@ -522,7 +889,21 @@ func (ac *AgentConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	ac.raw = raw
+	ac.normaliseModel()
+
 	return nil
+}
+
+func (ac *AgentConfig) normaliseModel() {
+	trimmed := strings.TrimSpace(ac.Model)
+	if trimmed == "" {
+		return
+	}
+
+	ac.Model = trimmed
+	if _, ok := ac.raw["model"].(string); ok {
+		ac.raw["model"] = trimmed
+	}
 }
 
 func (ac *AgentConfig) BuildOptions() []llms.CallOption {
@@ -574,13 +955,28 @@ func (ac *AgentConfig) BuildOptions() []llms.CallOption {
 	if _, ok := ac.raw["response_mime_type"]; ok && ac.ResponseMIMEType != "" {
 		options = append(options, llms.WithResponseMIMEType(ac.ResponseMIMEType))
 	}
-	if _, ok := ac.raw["reasoning"]; ok && (ac.Reasoning.Effort != llms.ReasoningNone || ac.Reasoning.MaxTokens != 0) {
-		switch ac.Reasoning.Effort {
-		case llms.ReasoningLow, llms.ReasoningMedium, llms.ReasoningHigh:
-			options = append(options, llms.WithReasoning(ac.Reasoning.Effort, 0))
-		default:
-			if ac.Reasoning.MaxTokens > 0 && ac.Reasoning.MaxTokens <= 32000 {
+	// The reasoning block is the provider-agnostic thinking control. langchaingo's
+	// shared openai adapter turns it into each vendor's own wire: reasoning.mode
+	// "off" becomes thinking.type=disabled (GLM/Kimi/DeepSeek) or enable_thinking
+	// false (DashScope), and reasoning.effort becomes the reasoning_effort string
+	// where the vendor documents it. extra_body (emitted below) merges into that
+	// wire key by key and wins on every key, so a thinking decision there that
+	// contradicts this block is refused before persist by
+	// ProviderConfig.ValidateThinkingAgreement.
+	if _, ok := ac.raw["reasoning"]; ok && !ac.Reasoning.IsZero() {
+		switch ac.Reasoning.EffectiveMode() {
+		case ReasoningModeOff:
+			options = append(options, llms.WithReasoningDisabled())
+		case ReasoningModeAdaptive:
+			// Adaptive thinking is applied per-call by PrepareAdaptiveCallOptions
+			// (it appends llms.WithAdaptiveReasoning); no CallOption is emitted here.
+		case ReasoningModeBudget:
+			if ac.Reasoning.MaxTokens > 0 && ac.Reasoning.MaxTokens <= 32768 {
 				options = append(options, llms.WithReasoning(llms.ReasoningNone, ac.Reasoning.MaxTokens))
+			}
+		default:
+			if slices.Contains(forwardedEfforts, ac.Reasoning.Effort) {
+				options = append(options, llms.WithReasoning(ac.Reasoning.Effort, 0))
 			}
 		}
 	}
@@ -596,7 +992,6 @@ func (ac *AgentConfig) marshalMap() map[string]any {
 		return nil
 	}
 
-	// use raw map if available, otherwise create a new one
 	if ac.raw != nil {
 		return ac.raw
 	}
@@ -645,7 +1040,7 @@ func (ac *AgentConfig) marshalMap() map[string]any {
 	if ac.ResponseMIMEType != "" {
 		output["response_mime_type"] = ac.ResponseMIMEType
 	}
-	if ac.Reasoning.Effort != llms.ReasoningNone || ac.Reasoning.MaxTokens != 0 {
+	if !ac.Reasoning.IsZero() {
 		output["reasoning"] = ac.Reasoning
 	}
 	if ac.Price != nil {
@@ -676,7 +1071,7 @@ func (pc *ProviderConfig) SetDefaultOptions(defaultOptions []llms.CallOption) {
 	if pc == nil {
 		return
 	}
-	pc.defaultOptions = defaultOptions
+	pc.defaultOptions = slices.Clip(defaultOptions)
 }
 
 func (pc *ProviderConfig) GetDefaultOptions() []llms.CallOption {
@@ -761,65 +1156,146 @@ func (pc *ProviderConfig) GetOptionsForType(optType ProviderOptionsType) []llms.
 		return nil
 	}
 
-	if agentConfig != nil {
-		if options := agentConfig.BuildOptions(); options != nil {
-			return options
-		}
-	}
-
-	return pc.defaultOptions
+	return pc.layerOverDefaults(agentConfig.BuildOptions())
 }
 
-func (pc *ProviderConfig) GetPriceInfoForType(optType ProviderOptionsType) *PriceInfo {
+func (pc *ProviderConfig) layerOverDefaults(options []llms.CallOption) []llms.CallOption {
+	switch {
+	case len(options) == 0:
+		return pc.defaultOptions
+	case len(pc.defaultOptions) == 0:
+		return options
+	}
+
+	layered := make([]llms.CallOption, 0, len(pc.defaultOptions)+len(options))
+	layered = append(layered, pc.defaultOptions...)
+
+	return append(layered, options...)
+}
+
+// AgentConfigForType returns the agent config for opt, applying the
+// SimpleJSON→Simple and Assistant→PrimaryAgent fallbacks. Returns nil for an
+// unset slot or unknown type.
+func (pc *ProviderConfig) AgentConfigForType(optType ProviderOptionsType) *AgentConfig {
 	if pc == nil {
 		return nil
 	}
 
-	var agentConfig *AgentConfig
 	switch optType {
 	case OptionsTypeSimple:
-		agentConfig = pc.Simple
+		return pc.Simple
 	case OptionsTypeSimpleJSON:
 		if pc.SimpleJSON != nil {
-			agentConfig = pc.SimpleJSON
-		} else {
-			agentConfig = pc.Simple
+			return pc.SimpleJSON
 		}
+		return pc.Simple
 	case OptionsTypePrimaryAgent:
-		agentConfig = pc.PrimaryAgent
+		return pc.PrimaryAgent
 	case OptionsTypeAssistant:
 		if pc.Assistant != nil {
-			agentConfig = pc.Assistant
-		} else {
-			agentConfig = pc.PrimaryAgent
+			return pc.Assistant
 		}
+		return pc.PrimaryAgent
 	case OptionsTypeGenerator:
-		agentConfig = pc.Generator
+		return pc.Generator
 	case OptionsTypeRefiner:
-		agentConfig = pc.Refiner
+		return pc.Refiner
 	case OptionsTypeAdviser:
-		agentConfig = pc.Adviser
+		return pc.Adviser
 	case OptionsTypeReflector:
-		agentConfig = pc.Reflector
+		return pc.Reflector
 	case OptionsTypeSearcher:
-		agentConfig = pc.Searcher
+		return pc.Searcher
 	case OptionsTypeEnricher:
-		agentConfig = pc.Enricher
+		return pc.Enricher
 	case OptionsTypeCoder:
-		agentConfig = pc.Coder
+		return pc.Coder
 	case OptionsTypeInstaller:
-		agentConfig = pc.Installer
+		return pc.Installer
 	case OptionsTypePentester:
-		agentConfig = pc.Pentester
+		return pc.Pentester
 	default:
 		return nil
 	}
+}
 
-	if agentConfig != nil && agentConfig.Price != nil {
+func (pc *ProviderConfig) GetPriceInfoForType(optType ProviderOptionsType) *PriceInfo {
+	if agentConfig := pc.AgentConfigForType(optType); agentConfig != nil {
 		return agentConfig.Price
 	}
 
 	return nil
+}
+
+func (pc *ProviderConfig) effectiveModel(opt ProviderOptionsType) string {
+	if agentConfig := pc.AgentConfigForType(opt); agentConfig != nil && agentConfig.Model != "" {
+		return agentConfig.Model
+	}
+
+	var options llms.CallOptions
+	for _, option := range pc.GetOptionsForType(opt) {
+		option(&options)
+	}
+
+	return options.GetModel()
+}
+
+func (pc *ProviderConfig) modelReasoningMode(models ModelsConfig, opt ProviderOptionsType) ModelReasoningMode {
+	model := pc.effectiveModel(opt)
+	if model == "" {
+		return ModelReasoningNone
+	}
+
+	for _, m := range models {
+		if m.Name == model && m.Reasoning != nil {
+			return m.Reasoning.Mode
+		}
+	}
+
+	return ModelReasoningNone
+}
+
+func (pc *ProviderConfig) reasoningConfigForType(opt ProviderOptionsType) (ReasoningConfig, bool) {
+	agentConfig := pc.AgentConfigForType(opt)
+	if agentConfig == nil || agentConfig.Reasoning.IsZero() {
+		return ReasoningConfig{}, false
+	}
+
+	return agentConfig.Reasoning, true
+}
+
+// UsesAdaptiveThinking reports whether this agent's call must use adaptive
+// thinking: the agent selected adaptive mode, or the model only supports adaptive
+// (e.g. Opus 4.7/4.8, where budget thinking returns a 400).
+func (pc *ProviderConfig) UsesAdaptiveThinking(models ModelsConfig, opt ProviderOptionsType) bool {
+	// An explicit off wins over the adaptive-only auto-adaptive below: the caller
+	// disabled thinking, so no adaptive CallOption may be appended (the disable is
+	// emitted in BuildOptions instead).
+	if reasoning, ok := pc.reasoningConfigForType(opt); ok && reasoning.EffectiveMode() == ReasoningModeOff {
+		return false
+	}
+	if pc.modelReasoningMode(models, opt) == ModelReasoningAdaptiveOnly {
+		return true
+	}
+
+	reasoning, ok := pc.reasoningConfigForType(opt)
+	return ok && reasoning.EffectiveMode() == ReasoningModeAdaptive
+}
+
+func (pc *ProviderConfig) PrepareAdaptiveCallOptions(
+	ctx context.Context,
+	models ModelsConfig,
+	opt ProviderOptionsType,
+	options []llms.CallOption,
+) (context.Context, []llms.CallOption) {
+	if !pc.UsesAdaptiveThinking(models, opt) {
+		return ctx, options
+	}
+
+	reasoning, _ := pc.reasoningConfigForType(opt)
+	options = append(options, llms.WithAdaptiveReasoning(reasoning.Effort))
+
+	return ctx, options
 }
 
 func (pc *ProviderConfig) BuildOptionsMap() map[ProviderOptionsType][]llms.CallOption {
@@ -851,18 +1327,12 @@ func (pc *ProviderConfig) buildSimpleJSONOptions() []llms.CallOption {
 		return nil
 	}
 
-	if pc.SimpleJSON != nil {
-		options := pc.SimpleJSON.BuildOptions()
-		if options != nil {
-			return options
-		}
+	if options := pc.SimpleJSON.BuildOptions(); options != nil {
+		return pc.layerOverDefaults(options)
 	}
 
-	if pc.Simple != nil {
-		options := pc.Simple.BuildOptions()
-		if options != nil {
-			return append(options, llms.WithJSONMode())
-		}
+	if options := pc.Simple.BuildOptions(); options != nil {
+		return append(pc.layerOverDefaults(options), llms.WithJSONMode())
 	}
 
 	if pc.defaultOptions != nil {
@@ -877,19 +1347,9 @@ func (pc *ProviderConfig) buildAssistantOptions() []llms.CallOption {
 		return nil
 	}
 
-	if pc.Assistant != nil {
-		options := pc.Assistant.BuildOptions()
-		if options != nil {
-			return options
-		}
+	if options := pc.Assistant.BuildOptions(); options != nil {
+		return pc.layerOverDefaults(options)
 	}
 
-	if pc.PrimaryAgent != nil {
-		options := pc.PrimaryAgent.BuildOptions()
-		if options != nil {
-			return options
-		}
-	}
-
-	return pc.defaultOptions
+	return pc.layerOverDefaults(pc.PrimaryAgent.BuildOptions())
 }

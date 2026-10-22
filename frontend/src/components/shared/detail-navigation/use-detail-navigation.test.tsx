@@ -11,11 +11,11 @@ interface Item {
     title: string;
 }
 
-const ITEMS: readonly Item[] = [
+const ITEMS = [
     { id: 'a', title: 'Alpha' },
     { id: 'b', title: 'Bravo' },
     { id: 'c', title: 'Charlie' },
-] as const;
+] as const satisfies readonly Item[];
 
 const getHref = (item: Item) => `/items/${item.id}`;
 const getLabel = (item: Item) => item.title;
@@ -170,7 +170,6 @@ describe('useDetailNavigation — derived state', () => {
         expect(result.current.nextId).toBe('c');
         expect(result.current.total).toBe(3);
         expect(result.current.hasEntries).toBe(true);
-        expect(result.current.itemsEmpty).toBe(false);
         expect(result.current.positionLabel).toBe('2/3');
     });
 
@@ -193,7 +192,7 @@ describe('useDetailNavigation — derived state', () => {
         expect(result.current.positionLabel).toBe('–/3');
     });
 
-    it('reports `itemsEmpty=true` and `–/0` when input list is empty', () => {
+    it('reports `–/0` when the input list is empty', () => {
         const { result } = renderHook(
             () =>
                 useDetailNavigation<Item>({
@@ -206,7 +205,6 @@ describe('useDetailNavigation — derived state', () => {
             { wrapper: renderInRoute(['/items/b']) },
         );
 
-        expect(result.current.itemsEmpty).toBe(true);
         expect(result.current.total).toBe(0);
         expect(result.current.hasEntries).toBe(false);
         expect(result.current.positionLabel).toBe('–/0');

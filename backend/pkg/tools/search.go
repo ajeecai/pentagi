@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"pentagi/pkg/database"
+	"pentagi/pkg/database/knowledge/limits"
 	"pentagi/pkg/graph/model"
 	obs "pentagi/pkg/observability"
 	"pentagi/pkg/observability/langfuse"
@@ -121,7 +122,6 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 			"answer_type":   action.Type,
 		})
 
-		// Execute multiple queries and collect all documents
 		var allDocs []schema.Document
 		for i, query := range action.Questions {
 			queryLogger := logger.WithFields(logrus.Fields{
@@ -137,7 +137,7 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 				vectorstores.WithFilters(filters),
 			)
 			if err != nil {
-				queryLogger.WithError(err).Error("failed to search answer for query")
+				obs.LogErrorOrCancel(queryLogger, err, "failed to search answer for query")
 				continue // Continue with other queries even if one fails
 			}
 
@@ -149,7 +149,6 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 			"total_docs_before_dedup": len(allDocs),
 		}).Debug("all queries completed")
 
-		// Merge, deduplicate, sort by score, and limit results
 		docs := MergeAndDeduplicateDocs(allDocs, searchVectorStoreResultLimit)
 
 		logger.WithFields(logrus.Fields{
@@ -183,9 +182,9 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 				langfuse.WithScoreName("search_answer_result"),
 				langfuse.WithScoreFloatValue(float64(doc.Score)),
 			)
-			buffer.WriteString(fmt.Sprintf("# Document %d Search Score: %f\n\n", i+1, doc.Score))
-			buffer.WriteString(fmt.Sprintf("## Original Answer Type: %s\n\n", doc.Metadata["answer_type"]))
-			buffer.WriteString(fmt.Sprintf("## Original Search Question\n\n%s\n\n", doc.Metadata["question"]))
+			fmt.Fprintf(&buffer, "# Document %d Search Score: %f\n\n", i+1, doc.Score)
+			fmt.Fprintf(&buffer, "## Original Answer Type: %s\n\n", doc.Metadata["answer_type"])
+			fmt.Fprintf(&buffer, "## Original Search Question\n\n%s\n\n", doc.Metadata["question"])
 			buffer.WriteString("## Content\n\n")
 			buffer.WriteString(doc.PageContent)
 			buffer.WriteString("\n\n")
@@ -197,8 +196,7 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 				logger.WithError(err).Error("failed to marshal filters")
 				return "", fmt.Errorf("failed to marshal filters: %w", err)
 			}
-			// Join all queries for logging
-			queriesText := strings.Join(action.Questions, "\n--------------------------------\n")
+			queriesText := s.replacer.ReplaceString(strings.Join(action.Questions, "\n--------------------------------\n"))
 			_, _ = s.vslp.PutLog(
 				ctx,
 				agentCtx.ParentAgentType,
@@ -221,11 +219,16 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 			return "", fmt.Errorf("failed to unmarshal %s store answer action arguments: %w", name, err)
 		}
 
+		action.Question = limits.FillBlankQuestion(action.Question, action.Answer, "Untitled answer")
+		if strings.TrimSpace(string(action.Type)) == "" {
+			action.Type = AnswerType(model.KnowledgeAnswerTypeOther)
+		}
+
 		// Anonymize before anything else so all downstream paths (including error
 		// branches that emit langfuse events) only ever expose the anonymized form.
 		var (
-			anonymizedAnswer   = s.replacer.ReplaceString(action.Answer)
-			anonymizedQuestion = s.replacer.ReplaceString(action.Question)
+			anonymizedAnswer   = boundedContent(s.replacer, action.Answer)
+			anonymizedQuestion = limits.TruncateToLimit(s.replacer.ReplaceString(action.Question), limits.MaxQuestionLen)
 		)
 
 		eventMetadata := map[string]any{
@@ -247,7 +250,6 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 			"answer":      action.Answer[:min(len(action.Answer), 1000)],
 		})
 
-		// Build common metadata for the document.
 		metadata := map[string]any{
 			"user_id":     s.userID,
 			"flow_id":     s.flowID,
@@ -373,9 +375,9 @@ func (s *search) Handle(ctx context.Context, name string, args json.RawMessage) 
 				agentCtx.ParentAgentType,
 				agentCtx.CurrentAgentType,
 				filtersData,
-				action.Question,
+				anonymizedQuestion,
 				database.VecstoreActionTypeStore,
-				action.Answer,
+				anonymizedAnswer,
 				s.taskID,
 				s.subtaskID,
 			)

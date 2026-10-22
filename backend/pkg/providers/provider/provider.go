@@ -10,6 +10,7 @@ import (
 	"pentagi/pkg/templates"
 
 	"github.com/vxcontrol/langchaingo/llms"
+	"github.com/vxcontrol/langchaingo/llms/reasoning"
 	"github.com/vxcontrol/langchaingo/llms/streaming"
 )
 
@@ -17,6 +18,33 @@ type ProviderType string
 
 func (p ProviderType) String() string {
 	return string(p)
+}
+
+// ReasoningProvider maps the provider type to the langchaingo reasoning.Provider
+// consumed ONLY by capability introspection for the settings UI (CannotDisable /
+// Supported hints via llms.ReasoningSupportFor / reasoning.ResolveOff) and by the
+// save-time check against what the door refuses — it has no effect on the actual
+// wire call, which each provider builds independently.
+//
+// Every OpenAI-compatible door, Custom included, maps to reasoning.ProviderOpenAI,
+// so the hints and the save-time check follow the model name, not whatever backend
+// Custom fronts behind LLM_SERVER_URL.
+func (p ProviderType) ReasoningProvider() reasoning.Provider {
+	switch p {
+	case ProviderAnthropic:
+		return reasoning.ProviderAnthropic
+	case ProviderBedrock:
+		return reasoning.ProviderBedrock
+	case ProviderGemini:
+		return reasoning.ProviderGoogleAI
+	case ProviderOpenAI, ProviderDeepSeek, ProviderGLM, ProviderKimi, ProviderQwen, ProviderMiniMax,
+		ProviderMistral, ProviderXAI, ProviderCustom:
+		return reasoning.ProviderOpenAI
+	case ProviderOllama:
+		return reasoning.ProviderOllama
+	default:
+		return reasoning.ProviderUnknown
+	}
 }
 
 const (
@@ -30,7 +58,28 @@ const (
 	ProviderGLM       ProviderType = "glm"
 	ProviderKimi      ProviderType = "kimi"
 	ProviderQwen      ProviderType = "qwen"
+	ProviderMiniMax   ProviderType = "minimax"
+	ProviderMistral   ProviderType = "mistral"
+	ProviderXAI       ProviderType = "xai"
 )
+
+// AllProviderTypes enumerates every supported provider type; keep it in sync with
+// the consts above. The API-layer type whitelist validates against it.
+var AllProviderTypes = ProvidersListTypes{
+	ProviderOpenAI,
+	ProviderAnthropic,
+	ProviderGemini,
+	ProviderBedrock,
+	ProviderOllama,
+	ProviderCustom,
+	ProviderDeepSeek,
+	ProviderGLM,
+	ProviderKimi,
+	ProviderQwen,
+	ProviderMiniMax,
+	ProviderMistral,
+	ProviderXAI,
+}
 
 type ProviderName string
 
@@ -49,6 +98,9 @@ const (
 	DefaultProviderNameGLM       ProviderName = ProviderName(ProviderGLM)
 	DefaultProviderNameKimi      ProviderName = ProviderName(ProviderKimi)
 	DefaultProviderNameQwen      ProviderName = ProviderName(ProviderQwen)
+	DefaultProviderNameMiniMax   ProviderName = ProviderName(ProviderMiniMax)
+	DefaultProviderNameMistral   ProviderName = ProviderName(ProviderMistral)
+	DefaultProviderNameXAI       ProviderName = ProviderName(ProviderXAI)
 )
 
 type Provider interface {
@@ -72,6 +124,16 @@ type Provider interface {
 		chain []llms.MessageContent,
 		tools []llms.Tool,
 		streamCb streaming.Callback,
+	) (*llms.ContentResponse, error)
+	// A reasoning option in extra cannot replace the thinking of an agent
+	// that uses adaptive thinking.
+	CallWithExtraOptions(
+		ctx context.Context,
+		opt pconfig.ProviderOptionsType,
+		chain []llms.MessageContent,
+		tools []llms.Tool,
+		streamCb streaming.Callback,
+		extra ...llms.CallOption,
 	) (*llms.ContentResponse, error)
 
 	// Configuration access methods

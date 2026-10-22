@@ -1,12 +1,15 @@
 package response
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"pentagi/pkg/server/logger"
 	"pentagi/pkg/version"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 )
 
@@ -37,6 +40,36 @@ func (h *HttpError) Error() string {
 }
 
 func Error(c *gin.Context, err *HttpError, original error) {
+	if err == ErrInternal && ranOutOfTime(original) {
+		err = ErrRequestTimeout
+	}
+
+	ErrorWithLevel(c, err, original, logger.LevelForStatus(err.HttpCode()))
+}
+
+func ranOutOfTime(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var pgErr *pq.Error
+
+	return errors.As(err, &pgErr) && pgErr.Code == pqQueryCanceled
+}
+
+// https://www.postgresql.org/docs/current/errcodes-appendix.html
+const pqQueryCanceled = pq.ErrorCode("57014")
+
+// ErrorWithLevel behaves exactly like Error but logs the "api error" entry at
+// the given level instead of always at Error. Use this for routes where a
+// non-2xx response is routine/expected (e.g. an unauthenticated request
+// hitting a protected endpoint) and logging it as an application error would
+// just add noise without indicating an actual problem.
+func ErrorWithLevel(c *gin.Context, err *HttpError, original error, level logrus.Level) {
 	body := gin.H{
 		"status": "error",
 		"code":   err.Code(),
@@ -51,7 +84,7 @@ func Error(c *gin.Context, err *HttpError, original error) {
 		"code":    err.HttpCode(),
 		"message": err.Msg(),
 	}
-	logger.FromContext(c).WithFields(fields).WithError(original).Error("api error")
+	logger.FromContext(c).WithFields(fields).WithError(original).Log(level, "api error")
 
 	c.AbortWithStatusJSON(err.HttpCode(), body)
 }

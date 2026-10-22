@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,9 +23,10 @@ import (
 )
 
 const (
-	minMdContentSize   = 50
-	minHtmlContentSize = 300
-	minImgContentSize  = 2048
+	minMdContentSize         = 50
+	minHtmlContentSize       = 300
+	minImgContentSize        = 2048
+	maxScraperErrorBodyBytes = 512
 )
 
 // nonHTMLExtensions lists URL path suffixes that point to resources the scraper
@@ -41,7 +43,6 @@ var nonHTMLExtensions = []string{
 // isBinaryURL returns true when the URL points to a known non-HTML resource.
 func isBinaryURL(rawURL string) bool {
 	lower := strings.ToLower(rawURL)
-	// strip query string for extension matching
 	if idx := strings.Index(lower, "?"); idx != -1 {
 		lower = lower[:idx]
 	}
@@ -147,6 +148,22 @@ func (b *browser) Handle(ctx context.Context, name string, args json.RawMessage)
 		return "", fmt.Errorf("failed to unmarshal browser action: %w", err)
 	}
 
+	// LLMs occasionally wrap the URL with an incidental leading/trailing
+	// newline, carriage return, or space (e.g. copy-pasted from command
+	// output); net/url.Parse rejects control characters outright, failing the
+	// whole call over whitespace that carries no meaning. Strip it here so it
+	// never reaches resolveUrl.
+	action.Url = strings.TrimSpace(action.Url)
+
+	if action.Action == "" {
+		// The LLM occasionally omits the required 'action' field even though the
+		// tool schema marks it required. 'markdown' is the safest default: it is
+		// the most commonly used and most versatile content format, so infer it
+		// instead of failing the call outright and burning a tool-call-fixer
+		// round-trip on something that doesn't need one.
+		action.Action = Markdown
+	}
+
 	logger = logger.WithFields(logrus.Fields{
 		"action": action.Action,
 		"url":    action.Url,
@@ -163,8 +180,8 @@ func (b *browser) Handle(ctx context.Context, name string, args json.RawMessage)
 		result, screen, err := b.Links(ctx, action.Url)
 		return b.wrapCommandResult(ctx, name, result, action.Url, screen, err)
 	default:
-		logger.Error("unknown file action")
-		return "", fmt.Errorf("unknown file action: %s", action.Action)
+		logger.Error("unknown browser action")
+		return "", fmt.Errorf("unknown browser action: %s", action.Action)
 	}
 }
 
@@ -185,12 +202,12 @@ func (b *browser) ContentMD(ctx context.Context, url string) (string, string, er
 
 	go func() {
 		defer wg.Done()
-		content, errContent = b.getMD(url)
+		content, errContent = b.getMD(ctx, url)
 	}()
 
 	go func() {
 		defer wg.Done()
-		screenshotName, errScreenshot = b.getScreenshot(url)
+		screenshotName, errScreenshot = b.getScreenshot(ctx, url)
 	}()
 
 	wg.Wait()
@@ -223,12 +240,12 @@ func (b *browser) ContentHTML(ctx context.Context, url string) (string, string, 
 
 	go func() {
 		defer wg.Done()
-		content, errContent = b.getHTML(url)
+		content, errContent = b.getHTML(ctx, url)
 	}()
 
 	go func() {
 		defer wg.Done()
-		screenshotName, errScreenshot = b.getScreenshot(url)
+		screenshotName, errScreenshot = b.getScreenshot(ctx, url)
 	}()
 
 	wg.Wait()
@@ -261,12 +278,12 @@ func (b *browser) Links(ctx context.Context, url string) (string, string, error)
 
 	go func() {
 		defer wg.Done()
-		links, errLinks = b.getLinks(url)
+		links, errLinks = b.getLinks(ctx, url)
 	}()
 
 	go func() {
 		defer wg.Done()
-		screenshotName, errScreenshot = b.getScreenshot(url)
+		screenshotName, errScreenshot = b.getScreenshot(ctx, url)
 	}()
 
 	wg.Wait()
@@ -293,7 +310,6 @@ func (b *browser) resolveUrl(targetURL string) (*url.URL, error) {
 		host = u.Host
 	}
 
-	// determine if target is private or public
 	isPrivate := false
 
 	hostIP := net.ParseIP(host)
@@ -318,7 +334,6 @@ func (b *browser) resolveUrl(targetURL string) (*url.URL, error) {
 		}
 	}
 
-	// select appropriate scraper URL with fallback
 	var scraperURL string
 	if isPrivate {
 		scraperURL = b.scPrvURL
@@ -336,7 +351,12 @@ func (b *browser) resolveUrl(targetURL string) (*url.URL, error) {
 		return nil, fmt.Errorf("no scraper URL configured")
 	}
 
-	return url.Parse(scraperURL)
+	parsed, err := url.Parse(scraperURL)
+	if err != nil {
+		// net/url quotes malformed input in its error, including Basic Auth.
+		return nil, errors.New("invalid scraper URL")
+	}
+	return parsed, nil
 }
 
 func (b *browser) saveScreenshotData(screenshot []byte) (string, error) {
@@ -359,7 +379,7 @@ func (b *browser) saveScreenshotData(screenshot []byte) (string, error) {
 	return screenshotName, nil
 }
 
-func (b *browser) getMD(targetURL string) (string, error) {
+func (b *browser) getMD(ctx context.Context, targetURL string) (string, error) {
 	if isBinaryURL(targetURL) {
 		return "", fmt.Errorf(
 			"the URL appears to point to a binary/non-HTML resource (e.g. PDF, image, archive) " +
@@ -377,7 +397,7 @@ func (b *browser) getMD(targetURL string) (string, error) {
 	scraperURL.Path = "/markdown"
 	scraperURL.RawQuery = query.Encode()
 
-	content, err := b.callScraper(scraperURL.String())
+	content, err := b.callScraper(ctx, scraperURL.String())
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch content by url '%s': %w", targetURL, err)
 	}
@@ -391,7 +411,7 @@ func (b *browser) getMD(targetURL string) (string, error) {
 	return string(content), nil
 }
 
-func (b *browser) getHTML(targetURL string) (string, error) {
+func (b *browser) getHTML(ctx context.Context, targetURL string) (string, error) {
 	if isBinaryURL(targetURL) {
 		return "", fmt.Errorf(
 			"the URL appears to point to a binary/non-HTML resource (e.g. PDF, image, archive) " +
@@ -409,7 +429,7 @@ func (b *browser) getHTML(targetURL string) (string, error) {
 	scraperURL.Path = "/html"
 	scraperURL.RawQuery = query.Encode()
 
-	content, err := b.callScraper(scraperURL.String())
+	content, err := b.callScraper(ctx, scraperURL.String())
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch content by url '%s': %w", targetURL, err)
 	}
@@ -423,7 +443,7 @@ func (b *browser) getHTML(targetURL string) (string, error) {
 	return string(content), nil
 }
 
-func (b *browser) getLinks(targetURL string) (string, error) {
+func (b *browser) getLinks(ctx context.Context, targetURL string) (string, error) {
 	scraperURL, err := b.resolveUrl(targetURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve url: %w", err)
@@ -434,7 +454,7 @@ func (b *browser) getLinks(targetURL string) (string, error) {
 	scraperURL.Path = "/links"
 	scraperURL.RawQuery = query.Encode()
 
-	content, err := b.callScraper(scraperURL.String())
+	content, err := b.callScraper(ctx, scraperURL.String())
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch links by url '%s': %w", targetURL, err)
 	}
@@ -449,7 +469,7 @@ func (b *browser) getLinks(targetURL string) (string, error) {
 	}
 
 	var buffer strings.Builder
-	buffer.WriteString(fmt.Sprintf("Links list from URL '%s'\n", targetURL))
+	fmt.Fprintf(&buffer, "Links list from URL '%s'\n", targetURL)
 	for _, l := range links {
 		link := strings.TrimSpace(l.Link)
 		if link == "" {
@@ -459,13 +479,13 @@ func (b *browser) getLinks(targetURL string) (string, error) {
 		if title == "" {
 			title = "UNTITLED"
 		}
-		buffer.WriteString(fmt.Sprintf("[%s](%s)\n", title, l.Link))
+		fmt.Fprintf(&buffer, "[%s](%s)\n", title, l.Link)
 	}
 
 	return buffer.String(), nil
 }
 
-func (b *browser) getScreenshot(targetURL string) (string, error) {
+func (b *browser) getScreenshot(ctx context.Context, targetURL string) (string, error) {
 	scraperURL, err := b.resolveUrl(targetURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve url: %w", err)
@@ -477,7 +497,7 @@ func (b *browser) getScreenshot(targetURL string) (string, error) {
 	scraperURL.Path = "/screenshot"
 	scraperURL.RawQuery = query.Encode()
 
-	content, err := b.callScraper(scraperURL.String())
+	content, err := b.callScraper(ctx, scraperURL.String())
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch screenshot by url '%s': %w", targetURL, err)
 	}
@@ -488,31 +508,95 @@ func (b *browser) getScreenshot(targetURL string) (string, error) {
 	return b.saveScreenshotData(content)
 }
 
-func (b *browser) callScraper(url string) ([]byte, error) {
+func (b *browser) callScraper(ctx context.Context, rawURL string) ([]byte, error) {
 	client := &http.Client{
 		Timeout: 65 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch data by scraper '%s': %w", url, err)
+		// Parsing errors may quote the malformed URL, including its credentials.
+		return nil, errors.New("failed to build scraper request")
+	}
+	// The URL may contain Basic Auth credentials. Keep them on the request, but
+	// never put its userinfo or query string into an error returned to the model,
+	// logs, or observability events.
+	endpoint := scraperErrorEndpoint(req.URL)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, &scraperTransportError{
+			endpoint: endpoint,
+			cause:    err,
+			detail:   scraperTransportReason(err),
+		}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected resp code for scraper '%s': %d", url, resp.StatusCode)
+		// Only a 5xx is the scraper failing; a 4xx rejects our own request, so its body is noise to the model.
+		if resp.StatusCode >= 500 && req.URL.User == nil {
+			// A gateway can echo arbitrary request data, including an encoded
+			// Authorization header. With Basic Auth, status is the only safe
+			// diagnostic to return to logs, traces and the model.
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxScraperErrorBodyBytes+1))
+			if preview := strings.TrimSpace(string(body)); preview != "" {
+				if truncated := len(body) > maxScraperErrorBodyBytes; truncated {
+					preview = preview[:maxScraperErrorBodyBytes] + "... [truncated]"
+				}
+				return nil, fmt.Errorf(
+					"unexpected resp code for scraper '%s': %d, response: %s", endpoint, resp.StatusCode, preview,
+				)
+			}
+		}
+		return nil, fmt.Errorf("unexpected resp code for scraper '%s': %d", endpoint, resp.StatusCode)
 	}
 
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body for scraper '%s': %w", url, err)
+		return nil, fmt.Errorf("failed to read response body for scraper '%s': %w", endpoint, err)
 	} else if len(content) == 0 {
-		return nil, fmt.Errorf("empty response body for scraper '%s'", url)
+		return nil, fmt.Errorf("empty response body for scraper '%s'", endpoint)
 	}
 
 	return content, nil
+}
+
+func scraperErrorEndpoint(u *url.URL) string {
+	if u == nil {
+		return "scraper"
+	}
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
+}
+
+// scraperTransportError keeps errors.Is usable for cancellation without letting
+// a wrapped url.Error print the URL and its Basic Auth credentials.
+type scraperTransportError struct {
+	endpoint string
+	cause    error
+	detail   string
+}
+
+func (e *scraperTransportError) Error() string {
+	return fmt.Sprintf("failed to fetch data by scraper '%s': %s", e.endpoint, e.detail)
+}
+
+func (e *scraperTransportError) Unwrap() error { return e.cause }
+
+func scraperTransportReason(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return "network timeout"
+	}
+	return "network or TLS error"
 }
 
 func (b *browser) IsAvailable() bool {

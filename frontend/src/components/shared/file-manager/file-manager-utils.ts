@@ -55,10 +55,6 @@ export const formatModifiedRelative = (modifiedAt?: Date | string): string => {
     }
 
     const now = Date.now();
-    // All `differenceIn*` helpers are computed up-front so each branch's
-    // fallback (`!minutes`, `!hours`, …) can guard against the upper unit
-    // rounding down to zero — without it, an edge case like 59 minutes 30s
-    // could fall through to the next branch and render as `0h ago`.
     const seconds = differenceInSeconds(now, date);
     const minutes = differenceInMinutes(now, date);
     const hours = differenceInHours(now, date);
@@ -191,7 +187,6 @@ export const buildFileManagerTree = (
     const groups = normalizeRootGroups(rootGroups);
     const roots: FileManagerInternalNode[] = groups?.length ? groups.map(buildSyntheticGroupRoot) : [];
 
-    // O(1) folder lookup by absolute path; replaces O(n) `siblings.find(...)`.
     const folderByPath = new Map<string, FileManagerInternalNode>();
 
     for (const file of sorted) {
@@ -275,8 +270,7 @@ const ALWAYS = (): true => true;
 
 /**
  * Single DFS walker that powers all `collect*` helpers. Pure: returns a freshly
- * allocated array. Internally uses a private accumulator to avoid `concat`
- * allocations on deep trees, but the buffer is never exposed to callers.
+ * allocated array.
  */
 export const walkTree = (
     nodes: FileManagerInternalNode[],
@@ -300,10 +294,6 @@ export const walkTree = (
 
     return result;
 };
-
-/** Collect paths of *file* nodes only (no synthetic group roots, no directories). */
-export const collectAllFilePaths = (nodes: FileManagerInternalNode[]): string[] =>
-    walkTree(nodes, { include: (node) => !node.isGroupRoot && !node.isDir });
 
 /**
  * Collect paths of every selectable node (files + real directories), excluding
@@ -370,7 +360,6 @@ export const collectDirectoryPaths = (nodes: FileManagerInternalNode[]): string[
         include: (node) => node.isDir,
     });
 
-/** Locale-aware case-insensitive name comparator. */
 const compareNames = (a: FileManagerInternalNode, b: FileManagerInternalNode): number =>
     a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
 
@@ -455,9 +444,6 @@ export const sortFileManagerTree = (
         }
 
         const reordered = [...recursed].sort((a, b) => {
-            // `isFoldersFirst` is treated as a primary partition before any
-            // other criterion so directories always stay above files
-            // regardless of the active comparator (or its absence).
             if (isFoldersFirst) {
                 const aIsDir = a.isDir || a.isGroupRoot;
                 const bIsDir = b.isDir || b.isGroupRoot;
@@ -530,7 +516,6 @@ export const buildFileManagerGridTemplate = (showSize: boolean, showModified: bo
     return cols.join(' ');
 };
 
-/** Recursively locate a node by its absolute path. Returns `undefined` when missing. */
 export const findNodeByPath = (
     nodes: readonly FileManagerInternalNode[],
     path: string,
@@ -573,10 +558,6 @@ export const dedupeOverlappingPaths = (paths: Iterable<string>): string[] => {
     return result;
 };
 
-/** Clamp `value` into the inclusive `[min, max]` range. */
-export const clamp = (min: number, value: number, max: number): number => Math.max(min, Math.min(value, max));
-
-/** Translate `(isAllSelected, isSomeSelected)` into the tri-state value the Checkbox understands. */
 export const getCheckboxState = (isAllSelected: boolean, isSomeSelected: boolean): 'indeterminate' | boolean => {
     if (isAllSelected) {
         return true;
@@ -615,8 +596,9 @@ export const collectSubtreePaths = (node: FileManagerInternalNode): string[] => 
     return result;
 };
 
-/** Default English pluralization for "N item" / "N items". Override via `labels.pluralizeItems`. */
-export const pluralizeItemsEnglish = (count: number): string => `${count} ${count === 1 ? 'item' : 'items'}`;
+export const pluralizeItems = (count: number): string => (count === 1 ? 'item' : 'items');
+
+export const pluralizeItemsEnglish = (count: number): string => `${count} ${pluralizeItems(count)}`;
 
 /**
  * Recursively sum every file's `size` inside a node's subtree. Synthetic group
@@ -642,9 +624,72 @@ const sumSubtreeBytes = (node: FileManagerInternalNode): number => {
     return node.size ?? 0;
 };
 
+const isSubtreeFullySelected = (node: FileManagerInternalNode, selectedPaths: ReadonlySet<string>): boolean => {
+    if (node.isGroupRoot || !selectedPaths.has(node.path)) {
+        return false;
+    }
+
+    return node.children.every((child) => isSubtreeFullySelected(child, selectedPaths));
+};
+
+interface ResolveActionPathsArgs {
+    selectedPaths: ReadonlySet<string>;
+    tree: readonly FileManagerInternalNode[];
+}
+
+/**
+ * Paths a bulk action (or a drag) should carry. Move, copy and delete are
+ * recursive on the server, so a directory may only stand in for its descendants
+ * when every one of them is selected.
+ *
+ * Pass the full tree, never the visible one: a search filter hides descendants
+ * without deselecting them, and they would pass for "all selected".
+ */
+export const resolveActionPaths = ({ selectedPaths, tree }: ResolveActionPathsArgs): string[] => {
+    if (selectedPaths.size === 0) {
+        return [];
+    }
+
+    const paths: string[] = [];
+
+    const walk = (nodes: readonly FileManagerInternalNode[]): void => {
+        for (const node of nodes) {
+            if (isSubtreeFullySelected(node, selectedPaths)) {
+                paths.push(node.path);
+
+                continue;
+            }
+
+            walk(node.children);
+        }
+    };
+
+    walk(tree);
+
+    return paths;
+};
+
+const countSubtreeNodes = (node: FileManagerInternalNode): number =>
+    node.children.reduce((total, child) => total + countSubtreeNodes(child), 1);
+
+/** How many rows an action on `paths` will touch, descendants included. */
+export const countAffectedEntries = (tree: readonly FileManagerInternalNode[], paths: Iterable<string>): number => {
+    let total = 0;
+
+    for (const path of paths) {
+        const node = findNodeByPath(tree, path);
+
+        if (node) {
+            total += countSubtreeNodes(node);
+        }
+    }
+
+    return total;
+};
+
 /**
  * Cumulative byte total for the bulk-bar size summary. Walks `paths` (which the
- * caller is expected to have already deduped via `dedupeOverlappingPaths`) and
+ * caller is expected to have already resolved via `resolveActionPaths`) and
  * adds each entry's contribution: a file pulls its own `size`, a directory pulls
  * the recursive sum of its descendants.
  *
@@ -781,7 +826,6 @@ interface ComputeRowClickSelectionArgs {
     /** Visible nodes in DFS order; range modifier resolves anchor/target indices against this list. */
     flatVisible: readonly string[];
     modifier: 'range' | 'single' | 'toggle';
-    /** Path of the row that was clicked. */
     path: string;
     /** Current selection. Pure reducer — never mutated. */
     prev: ReadonlySet<string>;
@@ -938,7 +982,6 @@ export const computeToggleSelection = ({ path, prev, subtreePaths }: ComputeTogg
 };
 
 interface ComputeToggleSelectAllArgs {
-    /** Universe of every selectable path in the current visible tree. */
     allSelectablePaths: readonly string[];
     prev: ReadonlySet<string>;
 }

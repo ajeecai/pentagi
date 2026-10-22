@@ -11,6 +11,7 @@ import (
 	"pentagi/pkg/server/rdb"
 	"pentagi/pkg/server/response"
 
+	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
 	"golang.org/x/crypto/bcrypt"
@@ -39,14 +40,18 @@ var usersSQLMappers = map[string]any{
 }
 
 type UserService struct {
-	db        *gorm.DB
-	userCache *auth.UserCache
+	db             *gorm.DB
+	userCache      *auth.UserCache
+	baseURL        string
+	sessionTimeout int
 }
 
-func NewUserService(db *gorm.DB, userCache *auth.UserCache) *UserService {
+func NewUserService(db *gorm.DB, userCache *auth.UserCache, baseURL string, sessionTimeout int) *UserService {
 	return &UserService{
-		db:        db,
-		userCache: userCache,
+		db:             db,
+		userCache:      userCache,
+		baseURL:        baseURL,
+		sessionTimeout: sessionTimeout,
 	}
 }
 
@@ -172,11 +177,188 @@ func (s *UserService) ChangePasswordCurrentUser(c *gin.Context) {
 		"password_change_required": false,
 	}
 
-	if err = s.db.Model(&user).Scopes(scope).Updates(updates).Error; err != nil {
-		logger.FromContext(c).WithError(err).Errorf("error updating password for current user")
+	if err = s.changePassword(c, uid, updates); err != nil {
+		logger.FromContext(c).WithError(err).Errorf("error changing password for current user")
 		response.Error(c, response.ErrInternal, err)
 		return
 	}
+
+	response.Success(c, http.StatusOK, struct{}{})
+}
+
+func (s *UserService) changePassword(c *gin.Context, userID uint64, updates map[string]any) error {
+	tx := s.db.Begin()
+	if err := tx.Error; err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
+		return err
+	}
+
+	generation, err := auth.RevokeSessions(tx, nil, userID)
+	if err != nil {
+		return err
+	}
+
+	session := sessions.Default(c)
+	sessionUID, ok := session.Get("uid").(uint64)
+	isOwnSession := ok && sessionUID == userID
+	previous := session.Get("sgn")
+	if isOwnSession {
+		session.Set("sgn", generation)
+		// Saving without these options puts a second cookie at the store's
+		// default path, and the stale one wins.
+		session.Options(sessionOptions(c.Request, s.baseURL, s.sessionTimeout))
+		if err := session.Save(); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		if isOwnSession {
+			session.Set("sgn", previous)
+			if saveErr := session.Save(); saveErr != nil {
+				logger.FromContext(c).WithError(saveErr).
+					Error("failed to restore the session cookie after the password change was rolled back")
+			}
+		}
+		return err
+	}
+	if s.userCache != nil {
+		s.userCache.Invalidate(userID)
+	}
+
+	return nil
+}
+
+// ChangeEmailCurrentUser is a function to update account email
+// @Summary Update email for current user (account)
+// @Tags Users
+// @Accept json
+// @Produce json
+// @Param json body models.EmailChange true "container to validate and update account email"
+// @Success 200 {object} response.successResp "account email updated successful"
+// @Failure 400 {object} response.errorResp "invalid account email form data"
+// @Failure 403 {object} response.errorResp "updating account email not permitted"
+// @Failure 404 {object} response.errorResp "current user not found"
+// @Failure 409 {object} response.errorResp "email already exists"
+// @Failure 500 {object} response.errorResp "internal error on updating account email"
+// @Router /user/email [put]
+func (s *UserService) ChangeEmailCurrentUser(c *gin.Context) {
+	var (
+		err  error
+		form models.EmailChange
+		user models.UserPassword
+	)
+
+	if err = c.ShouldBindJSON(&form); err != nil || form.Valid() != nil {
+		if err == nil {
+			err = form.Valid()
+		}
+		logger.FromContext(c).WithError(err).Errorf("error binding JSON")
+		response.Error(c, response.ErrChangeEmailCurrentUserInvalidEmail, err)
+		return
+	}
+
+	uid := c.GetUint64("uid")
+	scope := func(db *gorm.DB) *gorm.DB {
+		return db.Where("id = ?", uid)
+	}
+
+	if err = s.db.Scopes(scope).Take(&user).Error; err != nil {
+		logger.FromContext(c).WithError(err).Errorf("error finding current user")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, response.ErrUsersNotFound, err)
+		} else {
+			response.Error(c, response.ErrInternal, err)
+		}
+		return
+	} else if err = user.Valid(); err != nil {
+		logger.FromContext(c).WithError(err).Errorf("error validating user data '%s'", user.Hash)
+		response.Error(c, response.ErrUsersInvalidData, err)
+		return
+	}
+
+	if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(form.CurrentPassword)); err != nil {
+		logger.FromContext(c).WithError(err).Errorf("error checking password for current user")
+		response.Error(c, response.ErrChangeEmailCurrentUserInvalidCurrentPassword, err)
+		return
+	}
+
+	// Check if another user already has the new email
+	var count int
+	if err = s.db.Model(&models.User{}).Where("mail = ? AND id != ?", form.Mail, uid).Count(&count).Error; err != nil {
+		logger.FromContext(c).WithError(err).Errorf("error checking email duplicate")
+		response.Error(c, response.ErrInternal, err)
+		return
+	}
+	if count > 0 {
+		logger.FromContext(c).Errorf("email already exists: %s", form.Mail)
+		response.Error(c, response.ErrChangeEmailCurrentUserEmailAlreadyExists, errors.New("email already exists"))
+		return
+	}
+
+	// OAuth logins match accounts by email (authLoginCallback), so a new address unlinks the provider.
+	updates := map[string]any{
+		"mail":     form.Mail,
+		"provider": nil,
+	}
+
+	if err = s.db.Model(&user).Scopes(scope).Updates(updates).Error; err != nil {
+		if isUniqueViolation(err) {
+			logger.FromContext(c).Warnf("email change rejected: address claimed concurrently")
+			response.Error(c, response.ErrChangeEmailCurrentUserEmailAlreadyExists, errors.New("email already exists"))
+			return
+		}
+		logger.FromContext(c).WithError(err).Errorf("error updating email for current user")
+		response.Error(c, response.ErrInternal, err)
+		return
+	}
+
+	s.userCache.Invalidate(uid)
+
+	response.Success(c, http.StatusOK, struct{}{})
+}
+
+// ChangeNameCurrentUser updates the display name of the current authenticated user
+// @Summary Change current account display name
+// @Tags User
+// @Accept json
+// @Produce json
+// @Param json body models.NameChange true "new display name"
+// @Success 200 {object} response.successResp "account name updated successful"
+// @Failure 400 {object} response.errorResp "invalid account name form data"
+// @Failure 404 {object} response.errorResp "current user not found"
+// @Failure 500 {object} response.errorResp "internal error on updating account name"
+// @Router /user/name [put]
+func (s *UserService) ChangeNameCurrentUser(c *gin.Context) {
+	var form models.NameChange
+
+	if err := c.ShouldBindJSON(&form); err != nil || form.Valid() != nil {
+		if err == nil {
+			err = form.Valid()
+		}
+		logger.FromContext(c).WithError(err).Errorf("error binding JSON")
+		response.Error(c, response.ErrChangeNameCurrentUserInvalidName, err)
+		return
+	}
+
+	uid := c.GetUint64("uid")
+	result := s.db.Model(&models.User{}).Where("id = ?", uid).Update("name", form.Name)
+	if result.Error != nil {
+		logger.FromContext(c).WithError(result.Error).Errorf("error updating name for current user")
+		response.Error(c, response.ErrInternal, result.Error)
+		return
+	}
+	if result.RowsAffected == 0 {
+		logger.FromContext(c).Errorf("current user not found for name change")
+		response.Error(c, response.ErrUsersNotFound, gorm.ErrRecordNotFound)
+		return
+	}
+
+	s.userCache.Invalidate(uid)
 
 	response.Success(c, http.StatusOK, struct{}{})
 }
@@ -215,7 +397,7 @@ func (s *UserService) GetUsers(c *gin.Context) {
 		return db
 	}
 
-	query.Init("users", usersSQLMappers)
+	_ = query.Init("users", usersSQLMappers)
 
 	if query.Group != "" {
 		if _, ok := usersSQLMappers[query.Group]; !ok {
@@ -285,7 +467,7 @@ func (s *UserService) GetUsers(c *gin.Context) {
 func (s *UserService) GetUser(c *gin.Context) {
 	var (
 		err  error
-		hash string = c.Param("hash")
+		hash = c.Param("hash")
 		resp models.UserRolePrivileges
 	)
 
@@ -450,7 +632,7 @@ func (s *UserService) CreateUser(c *gin.Context) {
 		return
 	}
 
-	s.userCache.Invalidate(resp.User.ID)
+	s.userCache.Invalidate(resp.ID)
 
 	response.Success(c, http.StatusCreated, resp)
 }
@@ -504,7 +686,10 @@ func (s *UserService) PatchUser(c *gin.Context) {
 			return db.Where("hash = ? AND id = ?", hash, uid)
 		}
 	}
-	if !slices.Contains(privs, "users.edit") && uhash != hash {
+	// Without users.edit only the caller's own record is editable, and not its
+	// password: /user/password asks for the current one, so a stolen cookie
+	// alone cannot take the account over.
+	if !slices.Contains(privs, "users.edit") && (uhash != hash || user.Password != "") {
 		logger.FromContext(c).Errorf("error filtering user role permissions: permission not found")
 		response.Error(c, response.ErrNotPermitted, nil)
 		return
@@ -537,7 +722,7 @@ func (s *UserService) PatchUser(c *gin.Context) {
 			"password":                 string(encPassword),
 			"password_change_required": false,
 		}
-		err = s.db.Model(&existingUser).Updates(updates).Error
+		err = s.changePassword(c, existingUser.ID, updates)
 	} else {
 		updates := map[string]any{
 			"name":   user.Name,
@@ -577,7 +762,7 @@ func (s *UserService) PatchUser(c *gin.Context) {
 		return
 	}
 
-	s.userCache.Invalidate(resp.User.ID)
+	s.userCache.Invalidate(resp.ID)
 
 	response.Success(c, http.StatusOK, resp)
 }
@@ -595,7 +780,7 @@ func (s *UserService) PatchUser(c *gin.Context) {
 func (s *UserService) DeleteUser(c *gin.Context) {
 	var (
 		err  error
-		hash string = c.Param("hash")
+		hash = c.Param("hash")
 		user models.UserRole
 	)
 

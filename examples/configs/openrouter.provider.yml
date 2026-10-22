@@ -1,128 +1,159 @@
+# OpenRouter agent configuration.
+#
+# Strategy:
+#   - deepseek-v4-flash for deterministic utility calls;
+#   - GPT-4.1 Mini for structured JSON;
+#   - deepseek-v4.1-flash for routine agent and tool work;
+#   - deepseek-v4-pro for the highest-effort refinement step.
+#
+# Reasoning control notes:
+#   - utility agents use low effort because routed providers do not consistently
+#     honor a complete reasoning disable;
+#   - workhorse agents use high effort;
+#   - the refiner uses max effort.
+# Sampling parameters are omitted where reasoning is enabled.
+#
+# Prices were read from https://openrouter.ai/api/v1/models on 2026-09-25 and
+# are dollars per 1M tokens. Re-validate after model or routing changes.
+
 simple:
-  model: "openai/gpt-4.1-mini"
-  temperature: 0.6
-  top_p: 0.95
+  model: "deepseek/deepseek-v4-flash"
   n: 1
-  max_tokens: 4000
+  max_tokens: 8192
+  reasoning:
+    effort: low
   price:
-    input: 0.4
-    output: 1.6
+    input: 0.064
+    output: 0.128
+    cache_read: 0.0128
 
 simple_json:
   model: "openai/gpt-4.1-mini"
-  temperature: 0.7
-  top_p: 1.0
   n: 1
-  max_tokens: 4000
+  max_tokens: 4096
   json: true
   price:
-    input: 0.4
-    output: 1.6
+    input: 0.40
+    output: 1.60
+    cache_read: 0.10
 
 primary_agent:
-  model: "openai/gpt-5" # x-ai/grok-3-mini, openai/o4-mini
+  model: "deepseek/deepseek-v4.1-flash"
   n: 1
-  max_tokens: 6000
-  reasoning:
-    effort: medium
-  price:
-    input: 1.25
-    output: 10.0
-
-assistant:
-  model: "openai/gpt-5" # x-ai/grok-4, x-ai/grok-3-mini, google/gemini-2.5-flash, openai/o4-mini
-  n: 1
-  max_tokens: 6000
-  reasoning:
-    effort: medium
-  price:
-    input: 1.25
-    output: 10.0
-
-generator:
-  model: "anthropic/claude-sonnet-4.5"
-  n: 1
-  max_tokens: 12000
-  reasoning:
-    max_tokens: 4000
-  price:
-    input: 3.0
-    output: 15.0
-
-refiner:
-  model: "google/gemini-2.5-pro"
-  n: 1
-  max_tokens: 10000
-  reasoning:
-    effort: medium
-  price:
-    input: 1.25
-    output: 10.0
-
-adviser:
-  model: "google/gemini-2.5-pro"
-  n: 1
-  max_tokens: 6000
+  max_tokens: 16384
   reasoning:
     effort: high
   price:
-    input: 1.25
-    output: 10.0
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
+
+assistant:
+  model: "deepseek/deepseek-v4.1-flash"
+  n: 1
+  max_tokens: 16384
+  reasoning:
+    effort: high
+  price:
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
+
+generator:
+  model: "deepseek/deepseek-v4.1-flash"
+  n: 1
+  max_tokens: 32768
+  reasoning:
+    effort: high
+  price:
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
+
+refiner:
+  model: "deepseek/deepseek-v4-pro"
+  n: 1
+  max_tokens: 32768
+  reasoning:
+    effort: max
+  price:
+    input: 0.86
+    output: 1.72
+    cache_read: 0.0717
+
+adviser:
+  model: "deepseek/deepseek-v4.1-flash"
+  n: 1
+  max_tokens: 16384
+  reasoning:
+    effort: high
+  price:
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
 
 reflector:
-  model: "openai/gpt-4.1-mini"
-  temperature: 0.8
-  top_p: 1.0
+  model: "deepseek/deepseek-v4-flash"
   n: 1
-  max_tokens: 4000
+  max_tokens: 4096
+  reasoning:
+    effort: low
   price:
-    input: 0.4
-    output: 1.6
+    input: 0.064
+    output: 0.128
+    cache_read: 0.0128
 
 searcher:
-  model: "x-ai/grok-3-mini"
+  model: "deepseek/deepseek-v4-flash"
   n: 1
-  max_tokens: 4000
+  max_tokens: 4096
   reasoning:
-    max_tokens: 1024
+    effort: low
   price:
-    input: 0.3
-    output: 0.5
+    input: 0.064
+    output: 0.128
+    cache_read: 0.0128
 
 enricher:
-  model: "openai/gpt-4.1-mini"
-  temperature: 0.95
-  top_p: 1.0
+  model: "deepseek/deepseek-v4.1-flash"
   n: 1
-  max_tokens: 6000
+  max_tokens: 8192
+  reasoning:
+    effort: high
   price:
-    input: 0.4
-    output: 1.6
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
 
 coder:
-  model: "anthropic/claude-sonnet-4.5"
+  model: "deepseek/deepseek-v4.1-flash"
   n: 1
-  max_tokens: 8000
+  max_tokens: 20480
   reasoning:
-    max_tokens: 2000
+    effort: high
   price:
-    input: 3.0
-    output: 15.0
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
 
 installer:
-  model: "google/gemini-2.5-flash"
+  model: "deepseek/deepseek-v4.1-flash"
   n: 1
-  max_tokens: 4000
+  max_tokens: 16384
   reasoning:
-    max_tokens: 1024
+    effort: high
   price:
-    input: 0.3
-    output: 2.5
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003
 
 pentester:
-  model: "moonshotai/kimi-k2-0905"
+  model: "deepseek/deepseek-v4.1-flash"
   n: 1
-  max_tokens: 6000
+  max_tokens: 16384
+  reasoning:
+    effort: high
   price:
-    input: 0.4
-    output: 2.0
+    input: 0.15
+    output: 0.60
+    cache_read: 0.003

@@ -1,4 +1,5 @@
 import { ApolloProvider } from '@apollo/client/react';
+import { MotionConfig } from 'motion/react';
 import { lazy, Suspense } from 'react';
 import {
     createBrowserRouter,
@@ -9,17 +10,20 @@ import {
     RouterProvider,
 } from 'react-router-dom';
 
-import AppLayout from '@/components/layouts/app-layout';
-import FlowsLayout from '@/components/layouts/flows-layout';
-import MainLayout from '@/components/layouts/main-layout';
-import SettingsLayout from '@/components/layouts/settings-layout';
+import AppLayout from '@/components/layouts/app/app-layout';
+import FlowsLayout from '@/components/layouts/flows/flows-layout';
+import MainLayout from '@/components/layouts/main/main-layout';
+import SettingsLayout from '@/components/layouts/settings/settings-layout';
 import ProtectedRoute from '@/components/routes/protected-route';
 import PublicRoute from '@/components/routes/public-route';
+import { ConnectionStatus } from '@/components/shared/connection-status';
 import { DocumentTitle } from '@/components/shared/document-title';
 import PageLoader from '@/components/shared/page-loader';
+import RouteErrorBoundary from '@/components/shared/route-error-boundary';
 import { Toaster } from '@/components/ui/sonner';
 import client from '@/lib/apollo';
 import { routeTitles } from '@/lib/route-titles';
+import { routes } from '@/lib/routes';
 import { FavoritesProvider } from '@/providers/favorites-provider';
 import { FlowProvider } from '@/providers/flow-provider';
 import { KnowledgesProvider } from '@/providers/knowledges-provider';
@@ -29,6 +33,7 @@ import { SidebarFlowsProvider } from '@/providers/sidebar-flows-provider';
 import { TemplatesProvider } from '@/providers/templates-provider';
 import { ThemeProvider } from '@/providers/theme-provider';
 import { UserProvider } from '@/providers/user-provider';
+import { VersionInfoProvider } from '@/providers/version-info-provider';
 
 import { SystemSettingsProvider } from './providers/system-settings-provider';
 
@@ -44,6 +49,7 @@ const Resources = lazy(() => import('@/pages/resources/resources'));
 const Template = lazy(() => import('@/pages/templates/template'));
 const Templates = lazy(() => import('@/pages/templates/templates'));
 const OAuthResult = lazy(() => import('@/pages/oauth-result'));
+const SettingsAccount = lazy(() => import('@/pages/settings/settings-account'));
 const SettingsAPITokens = lazy(() => import('@/pages/settings/settings-api-tokens'));
 const SettingsPrompt = lazy(() => import('@/pages/settings/settings-prompt'));
 const SettingsPrompts = lazy(() => import('@/pages/settings/settings-prompts'));
@@ -70,11 +76,13 @@ function ProtectedAppLayout() {
     return (
         <ProtectedRoute>
             <SystemSettingsProvider>
-                <ProvidersProvider>
-                    <SidebarFlowsProvider>
-                        <AppLayout />
-                    </SidebarFlowsProvider>
-                </ProvidersProvider>
+                <VersionInfoProvider>
+                    <ProvidersProvider>
+                        <SidebarFlowsProvider>
+                            <AppLayout />
+                        </SidebarFlowsProvider>
+                    </ProvidersProvider>
+                </VersionInfoProvider>
             </SystemSettingsProvider>
         </ProtectedRoute>
     );
@@ -98,11 +106,9 @@ function PublicLoginLayout() {
     );
 }
 
-// Root layout for the data router. Everything that previously sat between
-// `<BrowserRouter>` and `<Routes>` (providers, Suspense) lives here so it has
-// access to router hooks (`useNavigate`, `useLocation`, ...) while still being
-// rendered under the data router. This is what enables `useBlocker` and other
-// data-router-only features inside our pages.
+// Providers + Suspense live inside the data router (not wrapping `RouterProvider`) so
+// they can use router hooks (`useNavigate`, `useLocation`) and enable `useBlocker` and
+// other data-router-only features inside our pages.
 function RootLayout() {
     return (
         <UserProvider>
@@ -126,10 +132,11 @@ function RootLayout() {
 
 const router = createBrowserRouter(
     createRoutesFromElements(
-        <Route element={<RootLayout />}>
-            {/* private routes */}
+        <Route
+            element={<RootLayout />}
+            errorElement={<RouteErrorBoundary />}
+        >
             <Route element={<ProtectedAppLayout />}>
-                {/* Main layout for chat pages */}
                 <Route element={<MainLayout />}>
                     <Route
                         element={<Dashboard />}
@@ -137,7 +144,6 @@ const router = createBrowserRouter(
                         path="dashboard"
                     />
 
-                    {/* Flows section with FlowsProvider */}
                     <Route element={<FlowsLayout />}>
                         <Route
                             element={<Flows />}
@@ -187,7 +193,6 @@ const router = createBrowserRouter(
                     />
                 </Route>
 
-                {/* Settings with nested routes */}
                 <Route
                     element={<SettingsLayout />}
                     path="settings"
@@ -196,10 +201,15 @@ const router = createBrowserRouter(
                         element={
                             <Navigate
                                 replace
-                                to="providers"
+                                to={routes.settings.account}
                             />
                         }
                         index
+                    />
+                    <Route
+                        element={<SettingsAccount />}
+                        handle={routeTitles.account}
+                        path="account"
                     />
                     <Route
                         element={<SettingsProviders />}
@@ -226,12 +236,11 @@ const router = createBrowserRouter(
                         handle={routeTitles.apiTokens}
                         path="api-tokens"
                     />
-                    {/* Catch-all route for unknown settings paths */}
                     <Route
                         element={
                             <Navigate
                                 replace
-                                to="/settings/providers"
+                                to={routes.settings.account}
                             />
                         }
                         path="*"
@@ -239,14 +248,12 @@ const router = createBrowserRouter(
                 </Route>
             </Route>
 
-            {/* report routes */}
             <Route
                 element={<ProtectedReportLayout />}
                 handle={routeTitles.flowReport}
                 path="flows/:flowId/report"
             />
 
-            {/* public routes */}
             <Route
                 element={<PublicLoginLayout />}
                 handle={routeTitles.login}
@@ -259,13 +266,12 @@ const router = createBrowserRouter(
                 path="oauth/result"
             />
 
-            {/* other routes */}
             <Route
-                element={<Navigate to="/dashboard" />}
+                element={<Navigate to={routes.dashboard} />}
                 path="/"
             />
             <Route
-                element={<Navigate to="/dashboard" />}
+                element={<Navigate to={routes.dashboard} />}
                 path="*"
             />
         </Route>,
@@ -275,10 +281,13 @@ const router = createBrowserRouter(
 function App() {
     return (
         <ApolloProvider client={client}>
-            <ThemeProvider>
-                <Toaster />
-                <RouterProvider router={router} />
-            </ThemeProvider>
+            <MotionConfig reducedMotion="user">
+                <ThemeProvider>
+                    <Toaster />
+                    <ConnectionStatus />
+                    <RouterProvider router={router} />
+                </ThemeProvider>
+            </MotionConfig>
         </ApolloProvider>
     );
 }

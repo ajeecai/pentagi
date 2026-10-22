@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TooltipProvider } from '@/components/ui/tooltip';
 
-import { cycleColumnSort, DataTable } from './data-table';
+import { cycleColumnSort, DataTable, DataTableColumnHeader } from './data-table';
 
 interface Row {
     id: string;
@@ -41,6 +41,28 @@ afterEach(() => {
     localStorage.clear();
 });
 
+describe('DataTable — scroll region', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('names the region it scrolls in after its label', () => {
+        vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(743);
+        vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(606);
+
+        render(
+            <DataTable<Row>
+                columns={COLUMNS}
+                data={ROWS}
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        expect(screen.getByRole('region', { name: 'Rows' })).toContainElement(screen.getByRole('table'));
+    });
+});
+
 describe('DataTable — controlled filter projection', () => {
     it('projects `filterValue` into the visible rows when a `filterColumn` is set', () => {
         render(
@@ -49,6 +71,7 @@ describe('DataTable — controlled filter projection', () => {
                 data={ROWS}
                 filterColumn="name"
                 filterValue="Bravo"
+                label="Rows"
                 onFilterChange={() => {
                     /* no-op */
                 }}
@@ -56,7 +79,6 @@ describe('DataTable — controlled filter projection', () => {
             { wrapper: Wrapper },
         );
 
-        // The body shows only "Bravo" — Alpha and Charlie are filtered out.
         expect(screen.getByText('Bravo')).toBeInTheDocument();
         expect(screen.queryByText('Alpha')).not.toBeInTheDocument();
         expect(screen.queryByText('Charlie')).not.toBeInTheDocument();
@@ -69,6 +91,7 @@ describe('DataTable — controlled filter projection', () => {
                 data={ROWS}
                 filterColumn="name"
                 filterValue=""
+                label="Rows"
                 onFilterChange={() => {
                     /* no-op */
                 }}
@@ -92,6 +115,7 @@ describe('DataTable — controlled filter projection', () => {
                 filterColumn="name"
                 filterPlaceholder="Filter name..."
                 filterValue=""
+                label="Rows"
                 onFilterChange={onFilterChange}
             />,
             { wrapper: Wrapper },
@@ -121,6 +145,7 @@ describe('DataTable — controlled filter projection', () => {
                 filterColumn="name"
                 filterPlaceholder="Filter..."
                 filterValue="Alpha"
+                label="Rows"
                 onFilterChange={onFilterChange}
             />,
             { wrapper: Wrapper },
@@ -142,7 +167,7 @@ describe('DataTable — controlled filter projection', () => {
     // share a `Host` shape — a parent that mirrors the controlled value to
     // local state and hands `DataTableFilter` a fresh inline `onFilterChange`
     // per render (the same pattern real callers use through
-    // `useTableQueryFilter`). The tests assert on the sequence of emitted
+    // `useTableState`). The tests assert on the sequence of emitted
     // values rather than on internal state, so they remain valid even if
     // the underlying implementation changes shape again.
 
@@ -169,6 +194,7 @@ describe('DataTable — controlled filter projection', () => {
                 filterColumn="name"
                 filterPlaceholder="Filter..."
                 filterValue={value}
+                label="Rows"
                 onFilterChange={(next) => {
                     emitted.push(next);
                     setValue(next);
@@ -218,7 +244,7 @@ describe('DataTable — controlled filter projection', () => {
         render(<FilterHost emitted={emitted} />, { wrapper: Wrapper });
 
         const input = screen.getByPlaceholderText('Filter...');
-        await user.type(input, 'bravo', { delay: 5 });
+        await user.type(input, 'bravo');
         // No `waitFor` here — we want the X click to happen mid-debounce,
         // before any emit has reached the parent.
         expect(emitted).toEqual([]);
@@ -258,7 +284,7 @@ describe('DataTable — controlled filter projection', () => {
         );
 
         const input = screen.getByPlaceholderText('Filter...');
-        await user.type(input, 'cha', { delay: 5 });
+        await user.type(input, 'cha');
 
         // While the debounce is still pending, simulate an external write
         // (e.g. back-button popping to a different `?q=`).
@@ -352,7 +378,7 @@ describe('DataTable — controlled filter projection', () => {
 
         const { unmount } = render(<FilterHost emitted={emitted} />, { wrapper: Wrapper });
 
-        await user.type(screen.getByPlaceholderText('Filter...'), 'gone', { delay: 5 });
+        await user.type(screen.getByPlaceholderText('Filter...'), 'gone');
 
         // Unmount before the debounce settles.
         unmount();
@@ -386,6 +412,7 @@ describe('DataTable — controlled filter projection', () => {
                         filterColumn="name"
                         filterPlaceholder="Agent filter..."
                         filterValue={agent}
+                        label="Rows"
                         onFilterChange={(next) => {
                             emittedAgent.push(next);
                             setAgent(next);
@@ -397,6 +424,7 @@ describe('DataTable — controlled filter projection', () => {
                         filterColumn="name"
                         filterPlaceholder="Tool filter..."
                         filterValue={tool}
+                        label="Rows"
                         onFilterChange={(next) => {
                             emittedTool.push(next);
                             setTool(next);
@@ -504,6 +532,7 @@ describe('DataTable — uncontrolled filter is still routed through the same inp
                 data={ROWS}
                 filterColumn="name"
                 filterPlaceholder="Filter..."
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -527,6 +556,7 @@ describe('DataTable — does not render the filter input when `filterColumn` is 
             <DataTable<Row>
                 columns={COLUMNS}
                 data={ROWS}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -555,6 +585,7 @@ describe('DataTable — sorting state persists to storage', () => {
                     },
                 ]}
                 data={ROWS}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -577,6 +608,7 @@ describe('DataTable — controlled pageIndex reconciliation', () => {
             <DataTable<Row>
                 columns={COLUMNS}
                 data={ROWS}
+                label="Rows"
                 onPageChange={onPageChange}
                 pageIndex={9}
             />,
@@ -605,6 +637,7 @@ describe('DataTable — controlled pageIndex reconciliation', () => {
             <DataTable<Row>
                 columns={COLUMNS}
                 data={manyRows}
+                label="Rows"
                 onPageChange={onPageChange}
                 pageIndex={1}
             />,
@@ -655,6 +688,7 @@ describe('DataTable — controlled pageIndex reconciliation', () => {
             <DataTable<Row>
                 columns={COLUMNS}
                 data={manyRows}
+                label="Rows"
                 onPageChange={onPageChange}
                 pageIndex={1}
             />,
@@ -670,6 +704,7 @@ describe('DataTable — controlled pageIndex reconciliation', () => {
             <DataTable<Row>
                 columns={COLUMNS}
                 data={manyRows}
+                label="Rows"
                 onPageChange={onPageChange}
                 pageIndex={0}
             />,
@@ -692,6 +727,7 @@ describe('DataTable — empty results', () => {
             <DataTable<Row>
                 columns={COLUMNS}
                 data={[]}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -705,6 +741,7 @@ describe('DataTable — empty results', () => {
             <DataTable<Row>
                 columns={COLUMNS}
                 data={[]}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -720,6 +757,7 @@ describe('DataTable — empty results', () => {
                 columns={COLUMNS}
                 data={[]}
                 empty={{ entityName: 'flows' }}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -740,6 +778,7 @@ describe('DataTable — empty results', () => {
                 empty={{ entityName: 'flows' }}
                 filterColumn="name"
                 filterPlaceholder="Filter..."
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -762,6 +801,7 @@ describe('DataTable — empty results', () => {
                 data={ROWS}
                 filterColumn="name"
                 filterValue=""
+                label="Rows"
                 onFilterChange={() => {
                     /* no-op */
                 }}
@@ -785,6 +825,7 @@ describe('DataTable — empty results', () => {
                 data={ROWS}
                 filterColumn="name"
                 filterValue=""
+                label="Rows"
                 onFilterChange={() => {
                     /* no-op */
                 }}
@@ -802,6 +843,7 @@ describe('DataTable — empty results', () => {
                 data={ROWS}
                 filterColumn="name"
                 filterValue=""
+                label="Rows"
                 onFilterChange={() => {
                     /* no-op */
                 }}
@@ -843,6 +885,7 @@ describe('DataTable — multi-column search', () => {
                 columns={MULTI_COLUMNS}
                 data={MULTI_ROWS}
                 filterPlaceholder="Filter..."
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -862,6 +905,33 @@ describe('DataTable — multi-column search', () => {
         expect(screen.getByText('Charlie')).toBeInTheDocument();
     });
 
+    it('folds diacritics so an unaccented query matches an accented cell', async () => {
+        const user = userEvent.setup();
+        const accentedRows: MultiRow[] = [
+            { id: 'a', name: 'Café Runner', role: 'admin' },
+            { id: 'b', name: 'Plain', role: 'user' },
+        ];
+
+        render(
+            <DataTable<MultiRow>
+                columns={MULTI_COLUMNS}
+                data={accentedRows}
+                filterPlaceholder="Filter..."
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        await user.type(screen.getByPlaceholderText('Filter...'), 'cafe');
+
+        // The list filter shares matching semantics with detail-navigation's
+        // Prev/Next subset — if this stops matching, the two have diverged.
+        await waitFor(() => {
+            expect(screen.queryByText('Plain')).not.toBeInTheDocument();
+        });
+        expect(screen.getByText('Café Runner')).toBeInTheDocument();
+    });
+
     it('narrows the search when the picker disables a candidate', async () => {
         const user = userEvent.setup();
         render(
@@ -869,6 +939,7 @@ describe('DataTable — multi-column search', () => {
                 columns={MULTI_COLUMNS}
                 data={MULTI_ROWS}
                 filterPlaceholder="Filter..."
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -893,6 +964,7 @@ describe('DataTable — multi-column search', () => {
             <DataTable<MultiRow>
                 columns={MULTI_COLUMNS}
                 data={MULTI_ROWS}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -911,6 +983,7 @@ describe('DataTable — multi-column search', () => {
                 columns={MULTI_COLUMNS}
                 data={MULTI_ROWS}
                 filterPlaceholder="Filter..."
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -943,6 +1016,7 @@ describe('DataTable — multi-column search', () => {
             <DataTable<MultiRow>
                 columns={MULTI_COLUMNS}
                 data={MULTI_ROWS}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -965,6 +1039,7 @@ describe('DataTable — multi-column search', () => {
                 data={MULTI_ROWS}
                 filterColumn={['name', 'role']}
                 filterPlaceholder="Filter..."
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -996,6 +1071,7 @@ describe('DataTable — multi-column search', () => {
             <DataTable<MultiRow>
                 columns={PLAIN_COLUMNS}
                 data={MULTI_ROWS}
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -1010,6 +1086,7 @@ describe('DataTable — multi-column search', () => {
                 columns={MULTI_COLUMNS}
                 data={MULTI_ROWS}
                 filterColumn="name"
+                label="Rows"
             />,
             { wrapper: Wrapper },
         );
@@ -1018,6 +1095,60 @@ describe('DataTable — multi-column search', () => {
         expect(screen.queryByRole('button', { name: /Search in/ })).not.toBeInTheDocument();
         // The "Columns" trigger still renders.
         expect(screen.getByRole('button', { name: /Columns/ })).toBeInTheDocument();
+    });
+});
+
+describe('DataTable — sort state is exposed to assistive technology', () => {
+    const SORTABLE_COLUMNS: ColumnDef<Row>[] = [
+        {
+            accessorKey: 'name',
+            header: ({ column }) => (
+                <DataTableColumnHeader
+                    column={column}
+                    title="Name"
+                />
+            ),
+        },
+        { enableSorting: false, header: 'Actions', id: 'actions' },
+    ];
+
+    const nameHeader = () => screen.getByRole('columnheader', { name: 'Name' });
+
+    it('cycles `aria-sort` on the header cell as the column is sorted', () => {
+        render(
+            <DataTable<Row>
+                columns={SORTABLE_COLUMNS}
+                data={ROWS}
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        expect(nameHeader()).toHaveAttribute('aria-sort', 'none');
+
+        const sortButton = screen.getByRole('button', { name: 'Name' });
+
+        fireEvent.click(sortButton);
+        expect(nameHeader()).toHaveAttribute('aria-sort', 'ascending');
+
+        fireEvent.click(sortButton);
+        expect(nameHeader()).toHaveAttribute('aria-sort', 'descending');
+
+        fireEvent.click(sortButton);
+        expect(nameHeader()).toHaveAttribute('aria-sort', 'none');
+    });
+
+    it('omits `aria-sort` on a column that cannot be sorted', () => {
+        render(
+            <DataTable<Row>
+                columns={SORTABLE_COLUMNS}
+                data={ROWS}
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        expect(screen.getByRole('columnheader', { name: 'Actions' })).not.toHaveAttribute('aria-sort');
     });
 });
 
@@ -1066,5 +1197,155 @@ describe('cycleColumnSort', () => {
         cycleColumnSort(column as unknown as Column<unknown>);
 
         expect(column.getIsSorted).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('DataTable — virtualization', () => {
+    // 60 rows on a single page (pageSize 100) so the rendered set clears the
+    // 50-row threshold and `isVirtualized` actually activates.
+    const VIRTUAL_ROWS: Row[] = Array.from({ length: 60 }, (_, index) => ({
+        id: String(index + 1),
+        name: `Row ${index + 1}`,
+    }));
+
+    let rectSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+        // jsdom reports a zero rect for everything. Pin a realistic row height
+        // so the window virtualizer culls a deterministic subset instead of
+        // collapsing zero-height rows and rendering all of them.
+        rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+            bottom: 53,
+            height: 53,
+            left: 0,
+            right: 800,
+            toJSON: () => ({}),
+            top: 0,
+            width: 800,
+            x: 0,
+            y: 0,
+        } as DOMRect);
+    });
+
+    afterEach(() => {
+        rectSpy.mockRestore();
+    });
+
+    // Body rows carry `data-index`; padding spacers and the header row don't.
+    const dataRows = () => document.querySelectorAll('tbody tr[data-index]');
+
+    it('renders only a subset of rows once past the threshold', async () => {
+        render(
+            <DataTable<Row>
+                columns={COLUMNS}
+                data={VIRTUAL_ROWS}
+                initialPageSize={100}
+                isVirtualized
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        await waitFor(() => expect(dataRows().length).toBeGreaterThan(0));
+        // The viewport can't hold all 60 estimated rows, so the window virtualizer
+        // culls the rest — far fewer rows reach the DOM than exist in the data.
+        expect(dataRows().length).toBeLessThan(VIRTUAL_ROWS.length);
+    });
+
+    it('exposes the true row total via aria-rowcount while virtualized', async () => {
+        render(
+            <DataTable<Row>
+                columns={COLUMNS}
+                data={VIRTUAL_ROWS}
+                initialPageSize={100}
+                isVirtualized
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        await waitFor(() => expect(dataRows().length).toBeGreaterThan(0));
+        // 60 data rows + 1 header row — what a screen reader announces as the total.
+        expect(document.querySelector('table')).toHaveAttribute('aria-rowcount', '61');
+        // Header occupies aria-rowindex 1; each data row is its data index + 2
+        // (1-based, past the header). Assert the relationship rather than a fixed
+        // index so the check is independent of which window the virtualizer renders.
+        expect(document.querySelector('thead tr')).toHaveAttribute('aria-rowindex', '1');
+        const firstDataRow = dataRows()[0];
+
+        if (!firstDataRow) {
+            throw new Error('no row');
+        }
+
+        const dataIndex = Number(firstDataRow.getAttribute('data-index'));
+        expect(firstDataRow).toHaveAttribute('aria-rowindex', String(dataIndex + 2));
+    });
+
+    it('keeps data-index on rows wrapped in a context menu (Radix asChild path)', async () => {
+        // Production /flows pairs `isVirtualized` with `renderRowContextMenu`, so
+        // every virtual row is wrapped in <ContextMenuTrigger asChild>. The
+        // measureElement ref and `data-index` must survive Radix's prop/ref
+        // merge or dynamic measurement silently breaks.
+        render(
+            <DataTable<Row>
+                columns={COLUMNS}
+                data={VIRTUAL_ROWS}
+                initialPageSize={100}
+                isVirtualized
+                label="Rows"
+                renderRowContextMenu={(row) => <div>menu for {row.name}</div>}
+            />,
+            { wrapper: Wrapper },
+        );
+
+        await waitFor(() => expect(dataRows().length).toBeGreaterThan(0));
+        dataRows().forEach((row) => expect(row).toHaveAttribute('data-index'));
+    });
+
+    it('does not virtualize at or below the threshold (full DOM, no aria-rowcount)', () => {
+        const fewRows: Row[] = Array.from({ length: 30 }, (_, index) => ({
+            id: String(index + 1),
+            name: `Row ${index + 1}`,
+        }));
+
+        render(
+            <DataTable<Row>
+                columns={COLUMNS}
+                data={fewRows}
+                initialPageSize={100}
+                isVirtualized
+                label="Rows"
+            />,
+            { wrapper: Wrapper },
+        );
+
+        // Every row is in the DOM, so native enumeration works — no spacer, no
+        // virtualization wiring, no aria-rowcount override.
+        expect(screen.getByText('Row 1')).toBeInTheDocument();
+        expect(screen.getByText('Row 30')).toBeInTheDocument();
+        expect(dataRows().length).toBe(0);
+        expect(document.querySelector('tbody tr[aria-hidden]')).not.toBeInTheDocument();
+        expect(document.querySelector('table')).not.toHaveAttribute('aria-rowcount');
+    });
+
+    it('disables virtualization when renderSubComponent is set, even past the threshold', () => {
+        render(
+            <DataTable<Row>
+                columns={COLUMNS}
+                data={VIRTUAL_ROWS}
+                initialPageSize={100}
+                isVirtualized
+                label="Rows"
+                renderSubComponent={({ row }) => <div>expanded {row.original.name}</div>}
+            />,
+            { wrapper: Wrapper },
+        );
+
+        // Expanded-row support wins over virtualization: the full set renders
+        // and no measurement wiring is attached.
+        expect(dataRows().length).toBe(0);
+        expect(screen.getByText('Row 1')).toBeInTheDocument();
+        expect(screen.getByText('Row 60')).toBeInTheDocument();
+        expect(document.querySelector('table')).not.toHaveAttribute('aria-rowcount');
     });
 });

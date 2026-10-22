@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -151,32 +150,13 @@ func RenderMarkdown(markdown string) {
 
 // InteractivePromptContext prompts the user for input with support for context cancellation
 func InteractivePromptContext(ctx context.Context, message string, reader io.Reader) (string, error) {
-	// Display the prompt
 	infoColor.Printf("%s: ", message)
 
-	// Create a channel for the user input
 	inputCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
-	// Start a goroutine to read user input
 	go func() {
-		// Use a buffered reader to properly handle input
-		r, ok := reader.(*os.File)
-		if !ok {
-			// If it's not a file (e.g., pipe or other reader), use normal scanner
-			scanner := bufio.NewScanner(reader)
-			if scanner.Scan() {
-				inputCh <- strings.TrimSpace(scanner.Text())
-			} else if err := scanner.Err(); err != nil {
-				errCh <- err
-			} else {
-				errCh <- io.EOF
-			}
-			return
-		}
-
-		// Create a new reader just for this input to avoid buffering issues
-		scanner := bufio.NewScanner(r)
+		scanner := bufio.NewScanner(oneByteReader{reader})
 		if scanner.Scan() {
 			inputCh <- strings.TrimSpace(scanner.Text())
 		} else if err := scanner.Err(); err != nil {
@@ -186,7 +166,6 @@ func InteractivePromptContext(ctx context.Context, message string, reader io.Rea
 		}
 	}()
 
-	// Wait for input or context cancellation
 	select {
 	case input := <-inputCh:
 		return input, nil
@@ -197,6 +176,18 @@ func InteractivePromptContext(ctx context.Context, message string, reader io.Rea
 		fmt.Println() // New line after prompt
 		return "", ctx.Err()
 	}
+}
+
+// oneByteReader keeps a prompt's scanner from reading past its line: the scanner is dropped
+// after one answer, and whatever it had buffered beyond the newline from a pipe or a
+// redirected stdin would never reach the next prompt.
+type oneByteReader struct{ r io.Reader }
+
+func (o oneByteReader) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	return o.r.Read(p)
 }
 
 // GetYesNoInputContext prompts the user for a Yes/No input with context support
@@ -228,7 +219,6 @@ func GetYesNoInputContext(ctx context.Context, message string, reader io.Reader)
 
 // IsMarkdownContent checks if the input string is likely markdown content
 func IsMarkdownContent(content string) bool {
-	// Determine if content is likely markdown by checking for common indicators
 	if strings.HasPrefix(content, "#") ||
 		strings.Contains(content, "\n#") ||
 		strings.Contains(content, "[") && strings.Contains(content, "](") ||

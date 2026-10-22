@@ -1,119 +1,154 @@
+# DeepInfra agent configuration.
+#
+# Strategy:
+#   - DeepSeek V4 Flash for inexpensive utility calls;
+#   - Gemma 4 31B for structured JSON;
+#   - DeepSeek V4.1 Flash for planning and routine tool work.
+#
+# Prices were read from https://api.deepinfra.com/v1/openai/models on 2026-09-25
+# and are dollars per 1M tokens.
+
 simple:
-  model: "Qwen/Qwen3-Next-80B-A3B-Instruct"
-  temperature: 0.7
-  top_p: 0.95
+  model: "deepseek-ai/DeepSeek-V4-Flash"
+  temperature: 1.0
+  top_p: 0.9
+  repetition_penalty: 1.0
   n: 1
-  max_tokens: 4000
+  max_tokens: 8192
   price:
-    input: 0.14
-    output: 1.4
+    input: 0.09
+    output: 0.18
+    cache_read: 0.018
 
 simple_json:
-  model: "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  model: "google/gemma-4-31B-it"
   temperature: 0.7
-  top_p: 1.0
+  top_p: 0.9
+  repetition_penalty: 1.0
   n: 1
-  max_tokens: 4000
+  max_tokens: 4096
   json: true
   price:
-    input: 0.14
-    output: 1.4
+    input: 0.13
+    output: 0.38
 
 primary_agent:
-  model: "moonshotai/Kimi-K2-Instruct-0905"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 6000
+  max_tokens: 16384
   price:
-    input: 0.4
-    output: 2.0
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 assistant:
-  model: "moonshotai/Kimi-K2-Instruct-0905"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 8000
+  max_tokens: 16384
   price:
-    input: 0.4
-    output: 2.0
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 generator:
-  model: "google/gemini-2.5-pro"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 8000
+  max_tokens: 32768
   price:
-    input: 1.25
-    output: 10.0
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 refiner:
-  model: "deepseek-ai/DeepSeek-R1-0528-Turbo"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 8000
+  max_tokens: 32768
   price:
-    input: 1.0
-    output: 3.0
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 adviser:
-  model: "google/gemini-2.5-pro"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 4000
+  max_tokens: 16384
   price:
-    input: 1.25
-    output: 10.0
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 reflector:
-  model: "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  model: "deepseek-ai/DeepSeek-V4-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 4000
+  max_tokens: 4096
   price:
-    input: 0.14
-    output: 1.4
+    input: 0.09
+    output: 0.18
+    cache_read: 0.018
 
 searcher:
-  model: "Qwen/Qwen3-32B"
+  model: "deepseek-ai/DeepSeek-V4-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 4000
+  max_tokens: 4096
   price:
-    input: 0.1
-    output: 0.3
+    input: 0.09
+    output: 0.18
+    cache_read: 0.018
 
 enricher:
-  model: "Qwen/Qwen3-32B"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 6000
+  max_tokens: 8192
   price:
-    input: 0.1
-    output: 0.3
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 coder:
-  model: "anthropic/claude-4-sonnet"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 8000
+  max_tokens: 20480
   price:
-    input: 3.3
-    output: 16.5
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 installer:
-  model: "google/gemini-2.5-flash"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 6000
+  max_tokens: 16384
   price:
-    input: 0.3
-    output: 2.5
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006
 
 pentester:
-  model: "moonshotai/Kimi-K2-Instruct-0905"
+  model: "deepseek-ai/DeepSeek-V4.1-Flash"
   temperature: 1.0
+  top_p: 0.95
   n: 1
-  max_tokens: 6000
+  max_tokens: 16384
   price:
-    input: 0.4
-    output: 2.0
+    input: 0.20
+    output: 0.60
+    cache_read: 0.006

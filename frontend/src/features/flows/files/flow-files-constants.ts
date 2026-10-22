@@ -19,7 +19,6 @@ export const FLOW_FILES_PULL_API_PATH = (flowId: string) => `/flows/${flowId}/fi
 export const FLOW_FILES_CONTAINER_API_PATH = (flowId: string) => `/flows/${flowId}/files/container`;
 export const FLOW_FILES_ATTACH_RESOURCES_API_PATH = (flowId: string) => `/flows/${flowId}/files/resources`;
 export const FLOW_FILES_PROMOTE_API_PATH = (flowId: string) => `/flows/${flowId}/files/to-resources`;
-export const RESOURCES_LIST_API_PATH = '/resources/';
 
 export const UPLOADS_TARGET_DIRECTORY = '/work/uploads';
 export const CONTAINER_TARGET_DIRECTORY = 'container/';
@@ -29,10 +28,6 @@ export const RESOURCES_TARGET_DIRECTORY = '/work/resources';
 export const CONTAINER_DEFAULT_PATH = '/work';
 
 // ── Upload limits (mirror backend's `pkg/flowfiles/files.go`) ──────────────
-//
-// Symmetric with the resources library limits (`features/resources/resources-constants.ts`)
-// today, but kept as a separate set so they can diverge from resources without
-// touching the resources call sites.
 
 /** Mirrors `flowfiles.MaxUploadFileSize` (300 MB). */
 export const FLOW_FILES_MAX_FILE_SIZE_MB = 300;

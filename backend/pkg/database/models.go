@@ -433,6 +433,9 @@ const (
 	ProviderTypeGlm       ProviderType = "glm"
 	ProviderTypeKimi      ProviderType = "kimi"
 	ProviderTypeQwen      ProviderType = "qwen"
+	ProviderTypeMinimax   ProviderType = "minimax"
+	ProviderTypeMistral   ProviderType = "mistral"
+	ProviderTypeXai       ProviderType = "xai"
 )
 
 func (e *ProviderType) Scan(src interface{}) error {
@@ -475,6 +478,7 @@ type SearchengineType string
 const (
 	SearchengineTypeGoogle     SearchengineType = "google"
 	SearchengineTypeTavily     SearchengineType = "tavily"
+	SearchengineTypeFirecrawl  SearchengineType = "firecrawl"
 	SearchengineTypeTraversaal SearchengineType = "traversaal"
 	SearchengineTypeBrowser    SearchengineType = "browser"
 	SearchengineTypeDuckduckgo SearchengineType = "duckduckgo"
@@ -1121,6 +1125,7 @@ type User struct {
 	PasswordChangeRequired bool           `json:"password_change_required"`
 	Provider               sql.NullString `json:"provider"`
 	CreatedAt              sql.NullTime   `json:"created_at"`
+	SessionGeneration      int64          `json:"session_generation"`
 }
 
 type UserPreference struct {

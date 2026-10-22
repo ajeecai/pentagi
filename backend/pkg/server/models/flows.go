@@ -58,7 +58,7 @@ type Flow struct {
 	Language           string           `form:"language" json:"language" validate:"max=70,required" gorm:"type:TEXT;NOT NULL"`
 	Functions          *tools.Functions `form:"functions,omitempty" json:"functions,omitempty" validate:"omitempty,valid" gorm:"type:JSON;NOT NULL;default:'{}'"`
 	ToolCallIDTemplate string           `form:"tool_call_id_template" json:"tool_call_id_template" validate:"max=70,required" gorm:"type:TEXT;NOT NULL"`
-	TraceID            *string          `form:"trace_id" json:"trace_id" validate:"max=70,required" gorm:"type:TEXT;NOT NULL"`
+	TraceID            *string          `form:"trace_id" json:"trace_id" validate:"omitempty,max=70" gorm:"type:TEXT"`
 	UserID             uint64           `form:"user_id" json:"user_id" validate:"min=0,numeric,required" gorm:"type:BIGINT;NOT NULL"`
 	CreatedAt          time.Time        `form:"created_at,omitempty" json:"created_at,omitempty" validate:"omitempty" gorm:"type:TIMESTAMPTZ;default:CURRENT_TIMESTAMP"`
 	UpdatedAt          time.Time        `form:"updated_at,omitempty" json:"updated_at,omitempty" validate:"omitempty" gorm:"type:TIMESTAMPTZ;default:CURRENT_TIMESTAMP"`
@@ -99,11 +99,12 @@ func (cf CreateFlow) Valid() error {
 // PatchFlow is model to contain flow patching paylaod
 // nolint:lll
 type PatchFlow struct {
-	Action      string   `form:"action" json:"action" validate:"required,oneof=stop finish input rename" enums:"stop,finish,input,rename" default:"stop"`
+	Action      string   `form:"action" json:"action" validate:"required,oneof=stop finish input rename report" enums:"stop,finish,input,rename,report" default:"stop"`
 	Input       *string  `form:"input,omitempty" json:"input,omitempty" validate:"required_if=Action input" example:"user input for waiting flow"`
 	Provider    *string  `form:"provider,omitempty" json:"provider,omitempty" validate:"omitempty"`
 	Name        *string  `form:"name,omitempty" json:"name,omitempty" validate:"required_if=Action rename" example:"new flow name"`
 	ResourceIDs []uint64 `form:"resource_ids,omitempty" json:"resource_ids,omitempty" validate:"omitempty" swaggertype:"array,integer"`
+	Timeout     *uint64  `form:"timeout,omitempty" json:"timeout,omitempty" validate:"omitempty,min=30,max=7200" example:"600"`
 }
 
 // Valid is function to control input/output data

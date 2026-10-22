@@ -80,6 +80,7 @@ var Observer Observability
 type Observability interface {
 	Flush(ctx context.Context) error
 	Shutdown(ctx context.Context) error
+	Drain(ctx context.Context) error
 	Meter
 	Tracer
 	Collector
@@ -201,27 +202,80 @@ func InitObserver(ctx context.Context, lfclient LangfuseClient, otelclient Telem
 }
 
 func (obs *observer) Flush(ctx context.Context) error {
+	var errs []error
 	if obs.lfclient != nil {
-		return obs.lfclient.ForceFlush(ctx)
+		if err := obs.lfclient.ForceFlush(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
-
 	if obs.otelclient != nil {
-		return obs.otelclient.ForceFlush(ctx)
+		if err := obs.otelclient.ForceFlush(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
-
-	return nil
+	return errors.Join(errs...)
 }
 
 func (obs *observer) Shutdown(ctx context.Context) error {
+	var errs []error
 	if obs.lfclient != nil {
-		return obs.lfclient.Shutdown(ctx)
+		if err := obs.lfclient.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
-
 	if obs.otelclient != nil {
-		return obs.otelclient.Shutdown(ctx)
+		if err := obs.otelclient.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Drain flushes then shuts down every telemetry sink, each in its own goroutine,
+// bounded by ctx. Draining concurrently (not serially like Flush/Shutdown) is
+// load-bearing: a sink can ignore ctx and block on its own timeout — langfuse's
+// ForceFlush/Shutdown do — so a serial drain lets one unhealthy sink burn the
+// whole budget and starve a healthy one. On deadline the still-blocked sink is
+// abandoned (the process is exiting), rather than holding up shutdown.
+func (obs *observer) Drain(ctx context.Context) error {
+	type sink struct {
+		name            string
+		flush, shutdown func(context.Context) error
+	}
+	var sinks []sink
+	if obs.lfclient != nil {
+		sinks = append(sinks, sink{"langfuse", obs.lfclient.ForceFlush, obs.lfclient.Shutdown})
+	}
+	if obs.otelclient != nil {
+		sinks = append(sinks, sink{"opentelemetry", obs.otelclient.ForceFlush, obs.otelclient.Shutdown})
 	}
 
-	return nil
+	results := make(chan error, len(sinks))
+	for _, s := range sinks {
+		go func(s sink) {
+			var errs []error
+			if err := s.flush(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("%s flush: %w", s.name, err))
+			}
+			if err := s.shutdown(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("%s shutdown: %w", s.name, err))
+			}
+			results <- errors.Join(errs...)
+		}(s)
+	}
+
+	var errs []error
+	for range sinks {
+		select {
+		case err := <-results:
+			if err != nil {
+				errs = append(errs, err)
+			}
+		case <-ctx.Done():
+			return errors.Join(append(errs, ctx.Err())...)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (obs *observer) StartProcessMetricCollect(attrs ...attribute.KeyValue) error {
@@ -467,45 +521,45 @@ func (obs *observer) makeRecord(entry *logrus.Entry, span oteltrace.Span) otello
 	record.SetSeverityText(levelString(entry.Level))
 
 	spanCtx := span.SpanContext()
-	attrs := make([]otellog.KeyValue, 0, len(entry.Data)+5)
-	attrs = append(attrs, otellog.String("trace.id", spanCtx.TraceID().String()))
-	attrs = append(attrs, otellog.String("span.id", spanCtx.SpanID().String()))
+	attrs := make([]attribute.KeyValue, 0, len(entry.Data)+5)
+	attrs = append(attrs, attribute.String("trace.id", spanCtx.TraceID().String()))
+	attrs = append(attrs, attribute.String("span.id", spanCtx.SpanID().String()))
 
 	if entry.Caller != nil {
 		if entry.Caller.Function != "" {
-			attrs = append(attrs, otellog.String(string(semconv.CodeFunctionKey), entry.Caller.Function))
+			attrs = append(attrs, attribute.String(string(semconv.CodeFunctionKey), entry.Caller.Function))
 		}
 		if entry.Caller.File != "" {
-			attrs = append(attrs, otellog.String(string(semconv.CodeFilepathKey), entry.Caller.File))
-			attrs = append(attrs, otellog.Int64(string(semconv.CodeLineNumberKey), int64(entry.Caller.Line)))
+			attrs = append(attrs, attribute.String(string(semconv.CodeFilepathKey), entry.Caller.File))
+			attrs = append(attrs, attribute.Int64(string(semconv.CodeLineNumberKey), int64(entry.Caller.Line)))
 		}
 	}
 
 	for k, v := range entry.Data {
 		if k == "error" {
-			attrs = append(attrs, otellog.KeyValue{
-				Key:   string(semconv.ExceptionStacktraceKey),
+			attrs = append(attrs, attribute.KeyValue{
+				Key:   semconv.ExceptionStacktraceKey,
 				Value: logValue(getStackTrace()),
 			})
 			switch val := v.(type) {
 			case error:
-				attrs = append(attrs, otellog.String(string(semconv.ExceptionTypeKey), reflect.TypeOf(val).String()))
-				attrs = append(attrs, otellog.String(string(semconv.ExceptionMessageKey), val.Error()))
+				attrs = append(attrs, attribute.String(string(semconv.ExceptionTypeKey), reflect.TypeOf(val).String()))
+				attrs = append(attrs, attribute.String(string(semconv.ExceptionMessageKey), val.Error()))
 			case fmt.Stringer:
-				attrs = append(attrs, otellog.String(string(semconv.ExceptionTypeKey), reflect.TypeOf(val).String()))
-				attrs = append(attrs, otellog.String(string(semconv.ExceptionMessageKey), val.String()))
+				attrs = append(attrs, attribute.String(string(semconv.ExceptionTypeKey), reflect.TypeOf(val).String()))
+				attrs = append(attrs, attribute.String(string(semconv.ExceptionMessageKey), val.String()))
 			case nil:
-				attrs = append(attrs, otellog.String(string(semconv.ExceptionTypeKey), "empty error type: nil"))
+				attrs = append(attrs, attribute.String(string(semconv.ExceptionTypeKey), "empty error type: nil"))
 			default:
-				attrs = append(attrs, otellog.String(string(semconv.ExceptionTypeKey), reflect.TypeOf(val).String()))
+				attrs = append(attrs, attribute.String(string(semconv.ExceptionTypeKey), reflect.TypeOf(val).String()))
 				if errorData, err := json.Marshal(val); err == nil {
-					attrs = append(attrs, otellog.String(string(semconv.ExceptionMessageKey), string(errorData)))
+					attrs = append(attrs, attribute.String(string(semconv.ExceptionMessageKey), string(errorData)))
 				}
 			}
 			continue
 		}
 
-		attrs = append(attrs, otellog.KeyValue{Key: k, Value: logValue(v)})
+		attrs = append(attrs, attribute.KeyValue{Key: attribute.Key(k), Value: logValue(v)})
 	}
 
 	record.AddAttributes(attrs...)
@@ -599,21 +653,20 @@ func attributeKeyValue(key string, value interface{}) attribute.KeyValue {
 	rv := reflect.ValueOf(value)
 
 	switch rv.Kind() {
-	case reflect.Array:
-		rv = rv.Slice(0, rv.Len())
-		fallthrough
-	case reflect.Slice:
-		switch reflect.TypeOf(value).Elem().Kind() {
+	case reflect.Array, reflect.Slice:
+		// Copied element by element: an array held in an interface cannot be resliced,
+		// and a slice of a named type does not assert to []string or []int.
+		switch rv.Type().Elem().Kind() {
 		case reflect.Bool:
-			return attribute.BoolSlice(key, rv.Interface().([]bool))
+			return attribute.BoolSlice(key, elements(rv, reflect.Value.Bool))
 		case reflect.Int:
-			return attribute.IntSlice(key, rv.Interface().([]int))
+			return attribute.IntSlice(key, elements(rv, func(v reflect.Value) int { return int(v.Int()) }))
 		case reflect.Int64:
-			return attribute.Int64Slice(key, rv.Interface().([]int64))
+			return attribute.Int64Slice(key, elements(rv, reflect.Value.Int))
 		case reflect.Float64:
-			return attribute.Float64Slice(key, rv.Interface().([]float64))
+			return attribute.Float64Slice(key, elements(rv, reflect.Value.Float))
 		case reflect.String:
-			return attribute.StringSlice(key, rv.Interface().([]string))
+			return attribute.StringSlice(key, elements(rv, reflect.Value.String))
 		default:
 			return attribute.KeyValue{Key: attribute.Key(key)}
 		}
@@ -632,51 +685,56 @@ func attributeKeyValue(key string, value interface{}) attribute.KeyValue {
 	return attribute.String(key, fmt.Sprint(value))
 }
 
-func logValue(value interface{}) otellog.Value {
+func elements[T any](rv reflect.Value, element func(reflect.Value) T) []T {
+	out := make([]T, rv.Len())
+	for i := range out {
+		out[i] = element(rv.Index(i))
+	}
+	return out
+}
+
+func logValue(value interface{}) attribute.Value {
 	switch value := value.(type) {
 	case nil:
-		return otellog.StringValue("<nil>")
+		return attribute.StringValue("<nil>")
 	case string:
-		return otellog.StringValue(value)
+		return attribute.StringValue(value)
 	case int:
-		return otellog.IntValue(value)
+		return attribute.IntValue(value)
 	case int64:
-		return otellog.Int64Value(value)
+		return attribute.Int64Value(value)
 	case uint64:
-		return otellog.Int64Value(int64(value))
+		return attribute.Int64Value(int64(value))
 	case float64:
-		return otellog.Float64Value(value)
+		return attribute.Float64Value(value)
 	case bool:
-		return otellog.BoolValue(value)
+		return attribute.BoolValue(value)
 	case fmt.Stringer:
-		return otellog.StringValue(value.String())
+		return attribute.StringValue(value.String())
 	}
 
 	rv := reflect.ValueOf(value)
 
 	switch rv.Kind() {
-	case reflect.Array:
-		rv = rv.Slice(0, rv.Len())
-		fallthrough
-	case reflect.Slice:
-		values := make([]otellog.Value, rv.Len())
+	case reflect.Array, reflect.Slice:
+		values := make([]attribute.Value, rv.Len())
 		for i := range values {
 			values[i] = logValue(rv.Index(i).Interface())
 		}
-		return otellog.SliceValue(values...)
+		return attribute.SliceValue(values...)
 	case reflect.Bool:
-		return otellog.BoolValue(rv.Bool())
+		return attribute.BoolValue(rv.Bool())
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return otellog.Int64Value(rv.Int())
+		return attribute.Int64Value(rv.Int())
 	case reflect.Float64:
-		return otellog.Float64Value(rv.Float())
+		return attribute.Float64Value(rv.Float())
 	case reflect.String:
-		return otellog.StringValue(rv.String())
+		return attribute.StringValue(rv.String())
 	}
 	if b, err := json.Marshal(value); err == nil {
-		return otellog.StringValue(string(b))
+		return attribute.StringValue(string(b))
 	}
-	return otellog.StringValue(fmt.Sprint(value))
+	return attribute.StringValue(fmt.Sprint(value))
 }
 
 func logSeverity(lvl logrus.Level) otellog.Severity {
@@ -731,4 +789,22 @@ func getPackageName(f string) string {
 	}
 
 	return f
+}
+
+// LogErrorOrCancel logs err on entry at Error level, unless err is (or wraps)
+// context.Canceled, in which case it logs at Warn level instead.
+//
+// In this codebase context.Canceled almost always propagates from an explicit
+// user action (stopping/pausing a flow or task, closing an assistant chat),
+// not from a genuine failure. Logging it at Error level pollutes error-rate
+// monitoring and alerting with expected, benign events. This helper keeps
+// that single decision in one place so every call site treats cancellation
+// consistently.
+func LogErrorOrCancel(entry *logrus.Entry, err error, msg string) {
+	if errors.Is(err, context.Canceled) {
+		entry.WithError(err).Warn(msg)
+		return
+	}
+
+	entry.WithError(err).Error(msg)
 }
