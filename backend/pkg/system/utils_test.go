@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -773,4 +774,60 @@ func TestHTTPClient_RealConnection_InsecureMode(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
+}
+
+func TestGetHTTPClient_BoundsTLSButAllowsSlowResponses(t *testing.T) {
+	t.Run("stalled TLS", func(t *testing.T) {
+		t.Parallel()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			conn, err := listener.Accept()
+			if err == nil {
+				defer conn.Close()
+				<-done
+			}
+		}()
+		client, err := GetHTTPClient(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		_, err = client.Get("https://" + listener.Addr().String())
+		if err == nil || !strings.Contains(err.Error(), "TLS handshake timeout") {
+			t.Fatalf("expected TLS timeout: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 13*time.Second {
+			t.Fatalf("TLS waited %v", elapsed)
+		}
+	})
+	t.Run("slow generation", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-time.After(11 * time.Second):
+				fmt.Fprint(w, "generated")
+			case <-r.Context().Done():
+			}
+		}))
+		defer server.Close()
+		client, err := GetHTTPClient(&config.Config{HTTPClientTimeout: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		data, err := io.ReadAll(response.Body)
+		if err != nil || string(data) != "generated" {
+			t.Fatalf("response=%q err=%v", data, err)
+		}
+	})
 }

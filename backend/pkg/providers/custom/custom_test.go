@@ -11,15 +11,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
+	"time"
 
 	"pentagi/pkg/config"
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
 
-	"github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vxcontrol/langchaingo/llms"
@@ -172,7 +170,7 @@ func TestCustom_DefaultProviderConfig_ReadsTheAgentsFromTheFileOrTheEnvironment(
 			t.Parallel()
 
 			cfg := tc.cfg
-			cfg.LLMServerKey, cfg.LLMServerURL = "k", customEndpoint(t, "").url
+			cfg.LLMServerKey, cfg.LLMServerURL = "k", customEndpoint(t, `{"data":[]}`).url
 
 			providerConfig, err := DefaultProviderConfig(&cfg)
 			if tc.wantErr != nil {
@@ -182,7 +180,7 @@ func TestCustom_DefaultProviderConfig_ReadsTheAgentsFromTheFileOrTheEnvironment(
 			require.NoError(t, err)
 
 			prov, err := New(&cfg, provider.DefaultProviderNameCustom, providerConfig, nil)
-			require.NoError(t, err, "a catalogue the server does not list must not stop the door")
+			require.NoError(t, err)
 
 			assert.Equal(t, provider.ProviderCustom, prov.Type())
 			assert.Equal(t, provider.DefaultProviderNameCustom, prov.Name())
@@ -261,82 +259,47 @@ func TestCustom_New_LoadsTheCatalogueOnlyForAnOpenAIDoor(t *testing.T) {
 	}
 }
 
-// Not parallel: it swaps the hooks of the global logger.
-func TestCustom_New_WarnsWithTheGatewayAndTheCauseOnlyWhenTheListingFails(t *testing.T) {
-	hook := new(logtest.Hook)
-	previous := logrus.StandardLogger().ReplaceHooks(logrus.LevelHooks{})
-	logrus.AddHook(hook)
-	t.Cleanup(func() { logrus.StandardLogger().ReplaceHooks(previous) })
-
-	tests := []struct {
-		name       string
-		gateway    func(t *testing.T) string
-		wantCause  error
-		wantText   string
-		wantModels pconfig.ModelsConfig
-	}{
-		{
-			name: "a gateway that refuses the connection",
-			gateway: func(t *testing.T) string {
-				listener, err := net.Listen("tcp", "127.0.0.1:0")
-				require.NoError(t, err)
-				require.NoError(t, listener.Close())
-				return "http://" + listener.Addr().String() + "/v1"
-			},
-			wantCause:  syscall.ECONNREFUSED,
-			wantModels: pconfig.ModelsConfig{},
-		},
-		{
-			name:       "a gateway that answers the listing with an error status",
-			gateway:    func(t *testing.T) string { return customEndpoint(t, "").url },
-			wantText:   "unexpected status code: 404",
-			wantModels: pconfig.ModelsConfig{},
-		},
-		{
-			name: "a gateway that lists its models",
-			gateway: func(t *testing.T) string {
-				return customEndpoint(t, `{"object":"list","data":[{"id":"gpt-5.6-terra","object":"model"}]}`).url
-			},
-			wantModels: pconfig.ModelsConfig{{Name: "gpt-5.6-terra"}},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			hook.Reset()
-			address := tc.gateway(t)
-
-			cfg := &config.Config{LLMServerKey: "k", LLMServerURL: address, LLMServerModel: "some-model"}
-			providerConfig, err := DefaultProviderConfig(cfg)
+func TestCustom_New_RejectsFailedModelListing(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{401, 403, 404, 405, 500, 501} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+			defer server.Close()
+			cfg := &config.Config{LLMServerKey: "k", LLMServerURL: server.URL, LLMServerModel: "test"}
+			pc, err := DefaultProviderConfig(cfg)
 			require.NoError(t, err)
-
-			prov, err := New(cfg, "my-gateway", providerConfig, nil)
-			require.NoError(t, err, "a gateway that does not list its models still builds a provider")
-			assert.Equal(t, tc.wantModels, prov.GetModels())
-
-			var warnings []*logrus.Entry
-			for _, entry := range hook.AllEntries() {
-				if entry.Level == logrus.WarnLevel {
-					warnings = append(warnings, entry)
-				}
-			}
-			if tc.wantCause == nil && tc.wantText == "" {
-				assert.Empty(t, warnings, "a listing that succeeds has nothing to warn about")
-				return
-			}
-
-			require.Len(t, warnings, 1)
-			assert.Equal(t, provider.ProviderName("my-gateway"), warnings[0].Data["provider"])
-			assert.Equal(t, address, warnings[0].Data["url"])
-			cause, _ := warnings[0].Data[logrus.ErrorKey].(error)
-			require.Error(t, cause, "the warning carries no cause")
-			if tc.wantCause != nil {
-				assert.ErrorIs(t, cause, tc.wantCause)
-			} else {
-				assert.EqualError(t, cause, tc.wantText)
-			}
+			prv, err := New(cfg, "test", pc, nil)
+			require.ErrorContains(t, err, fmt.Sprintf("unexpected status code: %d", status))
+			require.Nil(t, prv)
 		})
 	}
+	t.Run("no response", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+		defer server.Close()
+		cfg := &config.Config{LLMServerKey: "k", LLMServerURL: server.URL, LLMServerModel: "test"}
+		pc, err := DefaultProviderConfig(cfg)
+		require.NoError(t, err)
+		start := time.Now()
+		prv, err := New(cfg, "test", pc, nil)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Nil(t, prv)
+		require.Less(t, time.Since(start), 5*time.Second)
+	})
+	t.Run("connection refused", func(t *testing.T) {
+		t.Parallel()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		address := "http://" + listener.Addr().String()
+		require.NoError(t, listener.Close())
+		cfg := &config.Config{LLMServerKey: "k", LLMServerURL: address, LLMServerModel: "test"}
+		pc, err := DefaultProviderConfig(cfg)
+		require.NoError(t, err)
+		prv, err := New(cfg, "test", pc, nil)
+		require.ErrorContains(t, err, "failed to load LLM models")
+		require.Nil(t, prv)
+	})
 }
 
 func TestCustom_CustomAPI_AddressesTheDeploymentTheAPITypeNames(t *testing.T) {
@@ -368,7 +331,7 @@ func TestCustom_CustomAPI_AddressesTheDeploymentTheAPITypeNames(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			server := customEndpoint(t, "")
+			server := customEndpoint(t, `{"data":[]}`)
 			cfg := &config.Config{
 				LLMServerURL:        server.url,
 				LLMServerKey:        "k",
@@ -449,7 +412,7 @@ func TestCustom_CallWithExtraOptions_SendsTheCallsSamplingOverTheAgentsUnlessThi
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			server := customEndpoint(t, "")
+			server := customEndpoint(t, `{"data":[]}`)
 			prov := customDoor(t, server, tc.model, tc.agent)
 
 			_, err := prov.CallWithExtraOptions(context.Background(), pconfig.OptionsTypeSimple,
@@ -469,7 +432,7 @@ func TestCustom_CallWithExtraOptions_SendsTheCallsSamplingOverTheAgentsUnlessThi
 func TestCustom_CallWithExtraOptions_SendsTheToolChoiceBesideAPrefilledAssistantTurn(t *testing.T) {
 	t.Parallel()
 
-	server := customEndpoint(t, "")
+	server := customEndpoint(t, `{"data":[]}`)
 	prov := customDoor(t, server, "wire-test-model", `{"simple": {}}`)
 
 	chain := []llms.MessageContent{
@@ -524,7 +487,7 @@ func TestCustom_EveryCallPathPutsTheAgentsAdaptiveEffortOnTheWire(t *testing.T) 
 		t.Run(path.name, func(t *testing.T) {
 			t.Parallel()
 
-			server := customEndpoint(t, "")
+			server := customEndpoint(t, `{"data":[]}`)
 			prov := customDoor(t, server, "claude-sonnet-5", `{"simple": {"reasoning": {"mode": "adaptive", "effort": "xhigh"}}}`)
 			require.NoError(t, path.call(prov))
 

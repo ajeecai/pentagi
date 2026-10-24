@@ -17,6 +17,7 @@ import (
 
 	"pentagi/pkg/config"
 	"pentagi/pkg/database"
+	"pentagi/pkg/providers/custom"
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
 
@@ -831,4 +832,23 @@ func (r *recordingProvidersQuerier) CreateProvider(
 	r.created++
 	r.lastName = params.Name
 	return database.Provider{Name: params.Name}, nil
+}
+
+func TestProviders_SetupDoesNotRetryFailedConnection(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer server.Close()
+	cfg := &config.Config{LLMServerKey: "k", LLMServerURL: server.URL, LLMServerModel: "test", HTTPClientTimeout: 60}
+	pc, err := custom.DefaultProviderConfig(cfg)
+	require.NoError(t, err)
+	prv, err := custom.New(cfg, "test", pc, nil)
+	require.NoError(t, err)
+	server.Close()
+	start := time.Now()
+	_, err = callWithSetupRetries(context.Background(), prv, pconfig.OptionsTypeSimple, "hello")
+	require.ErrorIs(t, err, errSetupConnectionFailed)
+	require.Less(t, time.Since(start), 2*time.Second)
 }

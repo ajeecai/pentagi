@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1212,6 +1213,7 @@ func newAtomicInt64(seed int64) *atomic.Int64 {
 	return &number
 }
 
+// Do not retry failed connections; slow responses still use the model request budget.
 func callWithSetupRetries(
 	ctx context.Context,
 	prv provider.Provider,
@@ -1219,6 +1221,15 @@ func callWithSetupRetries(
 	prompt string,
 ) (string, error) {
 	return retryTransient(ctx, delayBetweenRetries, func() (string, error) {
-		return prv.Call(ctx, opt, prompt)
+		var connecting, connected atomic.Bool
+		attempt := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GetConn: func(string) { connecting.Store(true); connected.Store(false) },
+			GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+		})
+		result, err := prv.Call(attempt, opt, prompt)
+		if err != nil && connecting.Load() && !connected.Load() {
+			return "", fmt.Errorf("%w: %w", errSetupConnectionFailed, err)
+		}
+		return result, err
 	})
 }

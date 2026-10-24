@@ -13,6 +13,8 @@ import (
 	"github.com/vxcontrol/langchaingo/llms/reasoning"
 )
 
+var errSetupConnectionFailed = errors.New("LLM connection failed")
+
 var vendorStatusPattern = regexp.MustCompile(`API returned unexpected status code: (\d{3})`)
 
 // isDeterministicError reports whether the same request with the same options
@@ -78,7 +80,7 @@ func retryTransient[T any](ctx context.Context, delay time.Duration, call func()
 		switch {
 		case err == nil:
 			return result, nil
-		case errors.Is(err, context.Canceled) || isDeterministicError(err):
+		case errors.Is(err, context.Canceled) || errors.Is(err, errSetupConnectionFailed) || isDeterministicError(err):
 			return zero, err
 		case attempt == maxRetriesToCallSimpleChain:
 			return zero, fmt.Errorf("gave up after %d attempts: %w", attempt, err)

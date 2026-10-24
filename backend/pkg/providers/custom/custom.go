@@ -12,7 +12,6 @@ import (
 	"pentagi/pkg/system"
 	"pentagi/pkg/templates"
 
-	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/langchaingo/llms"
 	"github.com/vxcontrol/langchaingo/llms/openai"
 	"github.com/vxcontrol/langchaingo/llms/streaming"
@@ -154,10 +153,7 @@ func New(
 	if !api.isAzure() {
 		loaded, err := provider.LoadModelsFromHTTP(baseURL, baseKey, httpClient, cfg.LLMServerProvider)
 		if err != nil {
-			logrus.WithError(err).WithFields(logrus.Fields{
-				"provider": providerName,
-				"url":      baseURL,
-			}).Warn("custom provider could not list its models; model limits and capabilities stay unknown")
+			return nil, fmt.Errorf("failed to load LLM models: %w", err)
 		} else {
 			models = loaded
 		}

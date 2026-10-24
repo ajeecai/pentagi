@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 const (
 	// defaultHTTPClientTimeout is the fallback timeout when no config is provided.
 	defaultHTTPClientTimeout = 10 * time.Minute
+	connectionTimeout        = 10 * time.Second
 )
 
 func getHostname() string {
@@ -46,12 +48,14 @@ func GetSystemCertPool(cfg *config.Config) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// Connection establishment has a short budget; model generation keeps the configured request timeout.
 func GetHTTPClient(cfg *config.Config) (*http.Client, error) {
 	var httpClient *http.Client
 
 	if cfg == nil {
 		return &http.Client{
-			Timeout: defaultHTTPClientTimeout,
+			Timeout:   defaultHTTPClientTimeout,
+			Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: connectionTimeout, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: connectionTimeout},
 		}, nil
 	}
 
@@ -70,6 +74,8 @@ func GetHTTPClient(cfg *config.Config) (*http.Client, error) {
 		httpClient = &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
+				DialContext:         (&net.Dialer{Timeout: connectionTimeout, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout: connectionTimeout,
 				Proxy: func(req *http.Request) (*url.URL, error) {
 					return url.Parse(cfg.ProxyURL)
 				},
@@ -83,6 +89,8 @@ func GetHTTPClient(cfg *config.Config) (*http.Client, error) {
 		httpClient = &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
+				DialContext:         (&net.Dialer{Timeout: connectionTimeout, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout: connectionTimeout,
 				TLSClientConfig: &tls.Config{
 					RootCAs:            rootCAPool,
 					InsecureSkipVerify: cfg.ExternalSSLInsecure,
