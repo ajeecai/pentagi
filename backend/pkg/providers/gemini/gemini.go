@@ -72,6 +72,16 @@ func New(
 	providerName provider.ProviderName,
 	providerConfig *pconfig.ProviderConfig,
 ) (provider.Provider, error) {
+	// Saved credentials belong to this provider, not the shared process configuration.
+	local := *cfg
+	if providerConfig.APIKey != "" {
+		local.GeminiAPIKey = providerConfig.APIKey
+	}
+	if providerConfig.BaseURL != "" {
+		local.GeminiServerURL = providerConfig.BaseURL
+	}
+	cfg = &local
+
 	opts := []googleai.Option{
 		googleai.WithRest(),
 		googleai.WithAPIKey(cfg.GeminiAPIKey),

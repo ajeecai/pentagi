@@ -67,6 +67,16 @@ func New(
 	providerName provider.ProviderName,
 	providerConfig *pconfig.ProviderConfig,
 ) (provider.Provider, error) {
+	// Saved credentials belong to this provider, not the shared process configuration.
+	local := *cfg
+	if providerConfig.APIKey != "" {
+		local.OpenAIKey = providerConfig.APIKey
+	}
+	if providerConfig.BaseURL != "" {
+		local.OpenAIServerURL = providerConfig.BaseURL
+	}
+	cfg = &local
+
 	baseURL := cfg.OpenAIServerURL
 	httpClient, err := system.GetHTTPClient(cfg)
 	if err != nil {

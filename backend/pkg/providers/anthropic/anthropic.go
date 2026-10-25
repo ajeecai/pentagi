@@ -170,6 +170,16 @@ func New(
 	providerName provider.ProviderName,
 	providerConfig *pconfig.ProviderConfig,
 ) (provider.Provider, error) {
+	// Saved credentials belong to this provider, not the shared process configuration.
+	local := *cfg
+	if providerConfig.APIKey != "" {
+		local.AnthropicAPIKey = providerConfig.APIKey
+	}
+	if providerConfig.BaseURL != "" {
+		local.AnthropicServerURL = providerConfig.BaseURL
+	}
+	cfg = &local
+
 	baseURL := cfg.AnthropicServerURL
 	httpClient, err := system.GetHTTPClient(cfg)
 	if err != nil {

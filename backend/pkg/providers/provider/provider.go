@@ -203,9 +203,10 @@ func (p Providers) ListTypes() ProvidersListTypes {
 	for _, provider := range p {
 		mapTypes[provider.Type()] = struct{}{}
 	}
-	// Always include custom type so user-defined providers can be created via API
-	// without requiring LLM_SERVER_* environment variables to be set.
-	mapTypes[ProviderCustom] = struct{}{}
+	// These protocols accept credentials stored with each user-defined provider.
+	for _, kind := range []ProviderType{ProviderCustom, ProviderOpenAI, ProviderAnthropic, ProviderGemini} {
+		mapTypes[kind] = struct{}{}
+	}
 
 	listTypes := make([]ProviderType, 0, len(mapTypes))
 	for ptype := range mapTypes {
