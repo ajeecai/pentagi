@@ -691,13 +691,14 @@ func TestFlow_PutInput_SaysWhetherTheInputWasAccepted(t *testing.T) {
 	})
 }
 
-func TestFlow_Stop_ReleasesSandboxAndKeepsStoppedStatus(t *testing.T) {
+func TestFlow_Stop_PreservesSandboxAndKeepsStoppedStatus(t *testing.T) {
 	obs.InitObserver(context.Background(), nil, nil, nil)
 	fw := newStoppableWorker(nil)
 	executor := fw.flowCtx.Executor.(*callerFakeExecutor)
 	require.NoError(t, fw.Stop(context.Background()))
 	assert.ErrorIs(t, fw.ctx.Err(), context.Canceled)
-	assert.True(t, executor.released)
+	assert.True(t, executor.suspended)
+	assert.False(t, executor.released)
 	writes := fw.flowCtx.DB.(*finishFakeQuerier).flowStatus
 	require.Len(t, writes, 1)
 	status := writes[0].Status

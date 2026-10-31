@@ -902,9 +902,9 @@ func (fw *flowWorker) Stop(ctx context.Context) error {
 	fw.waitForReports()
 	fw.killFlowCommands(ctx)
 
-	// Stopping releases the sandbox; resuming prepares a new worker and sandbox.
-	if err := fw.flowCtx.Executor.Release(ctx); err != nil {
-		return fmt.Errorf("failed to release stopped flow resources: %w", err)
+	// Pausing stops execution without discarding files or installed tools.
+	if err := fw.flowCtx.Executor.Suspend(ctx); err != nil {
+		return fmt.Errorf("failed to suspend flow resources: %w", err)
 	}
 	return fw.SetStatus(ctx, database.FlowStatusStopped)
 }

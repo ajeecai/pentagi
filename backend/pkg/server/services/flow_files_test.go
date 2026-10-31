@@ -3693,3 +3693,7 @@ type copyToCall struct {
 	body        []byte
 	options     client.CopyToContainerOptions
 }
+
+func (d *fakeDockerClient) ResumeContainer(ctx context.Context, _ string, _ int64) error {
+	return ctx.Err()
+}

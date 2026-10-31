@@ -337,8 +337,9 @@ func newFinishController(q database.Querier) (*flowController, *cascadeFakePubli
 type callerFakeExecutor struct {
 	tools.FlowToolsExecutor
 
-	err      error
-	released bool
+	err       error
+	released  bool
+	suspended bool
 }
 
 func (e *callerFakeExecutor) Release(ctx context.Context) error {
@@ -804,4 +805,12 @@ func lifecycleAssistantCtx(q database.Querier, provs providers.ProviderControlle
 			},
 		},
 	}
+}
+
+func (e *callerFakeExecutor) Suspend(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.suspended = true
+	return e.err
 }

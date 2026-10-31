@@ -97,6 +97,7 @@ type DockerClient interface {
 	RunContainer(ctx context.Context, containerName string, containerType database.ContainerType,
 		flowID int64, config *container.Config, hostConfig *container.HostConfig) (database.Container, error)
 	StopContainer(ctx context.Context, containerID string, dbID int64) error
+	ResumeContainer(ctx context.Context, containerID string, dbID int64) error
 	RemoveContainer(ctx context.Context, containerID string, dbID int64) error
 	IsContainerRunning(ctx context.Context, containerID string) (bool, error)
 	KillFlowCommands(ctx context.Context, containerID string) error
@@ -743,6 +744,22 @@ func (dc *dockerClient) discardContainer(ctx context.Context, containerID string
 	if err != nil && !cerrdefs.IsNotFound(err) {
 		logger.WithError(err).Error("failed to remove the container that did not start")
 	}
+}
+
+// ResumeContainer retains the sandbox identity and writable layer.
+func (dc *dockerClient) ResumeContainer(ctx context.Context, containerID string, dbID int64) error {
+	if _, err := dc.client.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
+		return err
+	}
+	running, err := dc.IsContainerRunning(ctx, containerID)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return fmt.Errorf("resumed container is not running")
+	}
+	_, err = dc.db.UpdateContainerStatus(ctx, database.UpdateContainerStatusParams{Status: database.ContainerStatusRunning, ID: dbID})
+	return err
 }
 
 func (dc *dockerClient) StopContainer(ctx context.Context, containerID string, dbID int64) error {

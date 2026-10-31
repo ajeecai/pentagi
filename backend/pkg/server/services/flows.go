@@ -455,7 +455,7 @@ func (s *FlowService) PatchFlow(c *gin.Context) {
 	}
 
 	var fw controller.FlowWorker
-	if patchFlow.Action != "finish" {
+	if patchFlow.Action != "finish" && patchFlow.Action != "stop" {
 		fw, err = s.fc.GetFlow(c, int64(flow.ID))
 		if err != nil {
 			if errors.Is(err, controller.ErrFlowNotFound) {

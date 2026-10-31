@@ -339,6 +339,7 @@ type FlowToolsExecutor interface {
 
 	Prepare(ctx context.Context) error
 	Release(ctx context.Context) error
+	Suspend(ctx context.Context) error
 	GetCustomExecutor(cfg CustomExecutorConfig) (ContextToolsExecutor, error)
 	GetAssistantExecutor(cfg AssistantExecutorConfig) (ContextToolsExecutor, error)
 	GetPrimaryExecutor(cfg PrimaryExecutorConfig) (ContextToolsExecutor, error)
@@ -481,27 +482,29 @@ func (fte *flowToolsExecutor) SetGraphitiClient(client *graphiti.Client) {
 func (fte *flowToolsExecutor) Prepare(ctx context.Context) error {
 	if cnt, err := fte.db.GetFlowPrimaryContainer(ctx, fte.flowID); err == nil {
 		containerName := PrimaryTerminalName(fte.cfg.TenantPrefix(), fte.flowID)
-		// the stored status goes stale when the container is removed outside pentagi
-		isProbed := cnt.Status == database.ContainerStatusRunning ||
-			cnt.Status == database.ContainerStatusFailed && cnt.LocalID.String != ""
-		if isProbed {
+		if cnt.LocalID.String != "" {
 			running, err := fte.docker.IsContainerRunning(ctx, cnt.LocalID.String)
 			if err != nil {
 				return fmt.Errorf("failed to inspect container '%s': %w", containerName, err)
 			}
-			if running {
-				if cnt.Status != database.ContainerStatusRunning {
-					_, err := fte.db.UpdateContainerStatus(ctx, database.UpdateContainerStatusParams{
-						Status: database.ContainerStatusRunning,
-						ID:     cnt.ID,
-					})
-					if err != nil {
-						return fmt.Errorf("failed to mark container '%s' running: %w", containerName, err)
+			if !running {
+				if err := fte.docker.ResumeContainer(ctx, cnt.LocalID.String, cnt.ID); err != nil {
+					if !docker.IsNotFound(err) {
+						return fmt.Errorf("failed to resume preserved container: %w", err)
 					}
+					logrus.WithContext(ctx).WithField("flow_id", fte.flowID).Warn("saved sandbox is missing; rebuilding from persisted files and flow history")
+				} else {
+					running = true
 				}
-				// Kept rather than replaced: what was installed in it outside /work survives only in this container.
-				fte.primaryID = cnt.ID
-				fte.primaryLID = cnt.LocalID.String
+			} else if cnt.Status != database.ContainerStatusRunning {
+				if _, err := fte.db.UpdateContainerStatus(ctx, database.UpdateContainerStatusParams{
+					Status: database.ContainerStatusRunning, ID: cnt.ID,
+				}); err != nil {
+					return fmt.Errorf("failed to mark container '%s' running: %w", containerName, err)
+				}
+			}
+			if running {
+				fte.primaryID, fte.primaryLID = cnt.ID, cnt.LocalID.String
 				if err := fte.syncMissingFiles(ctx); err != nil {
 					return fmt.Errorf("failed to sync missing files to container '%s': %w", containerName, err)
 				}
@@ -740,6 +743,23 @@ func (fte *flowToolsExecutor) cachedResourcesDir() (string, error) {
 	}
 
 	return flowfiles.FlowResourcesDir(dataDir, uint64(fte.flowID)), nil
+}
+
+// Suspend preserves every sandbox and its writable layer for a later resume.
+func (fte *flowToolsExecutor) Suspend(ctx context.Context) error {
+	containers, err := fte.db.GetFlowContainers(ctx, fte.flowID)
+	if err != nil {
+		return err
+	}
+	for _, c := range containers {
+		if c.LocalID.String == "" || c.Status == database.ContainerStatusStopped {
+			continue
+		}
+		if err := fte.docker.StopContainer(ctx, c.LocalID.String, c.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (fte *flowToolsExecutor) Release(ctx context.Context) error {

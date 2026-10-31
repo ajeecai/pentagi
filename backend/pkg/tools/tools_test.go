@@ -29,6 +29,7 @@ import (
 	"pentagi/pkg/graphiti"
 	"pentagi/pkg/providers/embeddings"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moby/moby/client"
 	"github.com/sirupsen/logrus"
@@ -52,10 +53,10 @@ func toolsSandboxRow(status database.ContainerStatus, localID string) *database.
 	return &database.Container{ID: 7, Status: status, LocalID: sql.NullString{String: localID, Valid: localID != ""}}
 }
 
-func TestTools_Prepare_KeepsOrReplacesTheSandbox(t *testing.T) {
+func TestTools_Prepare_PreservesExistingSandbox(t *testing.T) {
 	errProbe := errors.New("Cannot connect to the Docker daemon")
 	errUpdate := errors.New("connection reset by peer")
-	errRemove := errors.New("removal of container primary is already in progress")
+	errMissing := cerrdefs.ErrNotFound
 	errLaunch := errors.New("No such image: vxcontrol/kali-linux")
 
 	cases := []struct {
@@ -64,6 +65,7 @@ func TestTools_Prepare_KeepsOrReplacesTheSandbox(t *testing.T) {
 		running     bool
 		probeErr    error
 		updateErr   error
+		resumeErr   error
 		removeErr   error
 		launchErr   error
 		wantErr     error
@@ -100,22 +102,18 @@ func TestTools_Prepare_KeepsOrReplacesTheSandbox(t *testing.T) {
 			wantLocalID: "fresh",
 		},
 		{
-			name:        "a sandbox that is gone is replaced",
+			name:        "a missing running sandbox is rebuilt",
 			row:         toolsSandboxRow(database.ContainerStatusRunning, "primary"),
-			running:     false,
+			resumeErr:   errMissing,
 			wantRemoved: []dockerRemoval{{localID: "primary", dbID: 7}},
-			wantLaunch:  true,
-			wantPrimary: 8,
-			wantLocalID: "fresh",
+			wantLaunch:  true, wantPrimary: 8, wantLocalID: "fresh",
 		},
 		{
-			name:        "a stopped sandbox is replaced without a probe",
+			name:        "a stopped sandbox keeps its identity on resume",
 			row:         toolsSandboxRow(database.ContainerStatusStopped, "primary"),
-			running:     true,
-			wantRemoved: []dockerRemoval{{localID: "primary", dbID: 7}},
-			wantLaunch:  true,
-			wantPrimary: 8,
-			wantLocalID: "fresh",
+			running:     false,
+			wantPrimary: 7,
+			wantLocalID: "primary",
 		},
 		{
 			name:        "a flow without a sandbox gets one",
@@ -140,14 +138,11 @@ func TestTools_Prepare_KeepsOrReplacesTheSandbox(t *testing.T) {
 			wantUpdates: []database.UpdateContainerStatusParams{{Status: database.ContainerStatusRunning, ID: 7}},
 		},
 		{
-			name:        "a gone sandbox that cannot be removed is still replaced",
-			row:         toolsSandboxRow(database.ContainerStatusRunning, "primary"),
-			running:     false,
-			removeErr:   errRemove,
+			name:        "a missing stopped sandbox is rebuilt",
+			row:         toolsSandboxRow(database.ContainerStatusStopped, "primary"),
+			resumeErr:   errMissing,
 			wantRemoved: []dockerRemoval{{localID: "primary", dbID: 7}},
-			wantLaunch:  true,
-			wantPrimary: 8,
-			wantLocalID: "fresh",
+			wantLaunch:  true, wantPrimary: 8, wantLocalID: "fresh",
 		},
 		{
 			name:        "a sandbox that cannot be launched fails the preparation",
@@ -155,6 +150,18 @@ func TestTools_Prepare_KeepsOrReplacesTheSandbox(t *testing.T) {
 			wantErr:     errLaunch,
 			wantErrText: "failed to launch container 'pentagi-terminal-42'",
 			wantLaunch:  true,
+		},
+		{
+			name:      "failed reconstruction remains an error",
+			row:       toolsSandboxRow(database.ContainerStatusStopped, "primary"),
+			resumeErr: errMissing, launchErr: errLaunch, wantErr: errLaunch,
+			wantErrText: "failed to launch container",
+			wantRemoved: []dockerRemoval{{localID: "primary", dbID: 7}}, wantLaunch: true,
+		},
+		{
+			name:      "a restart failure does not discard the existing sandbox",
+			row:       toolsSandboxRow(database.ContainerStatusStopped, "primary"),
+			resumeErr: errProbe, wantErr: errProbe, wantErrText: "failed to resume preserved container",
 		},
 	}
 
@@ -165,6 +172,7 @@ func TestTools_Prepare_KeepsOrReplacesTheSandbox(t *testing.T) {
 				isRunning: tc.running,
 				probeErr:  tc.probeErr,
 				removeErr: tc.removeErr,
+				resumeErr: tc.resumeErr,
 				launchErr: tc.launchErr,
 			}
 			fte := &flowToolsExecutor{db: db, cfg: &config.Config{DataDir: t.TempDir()}, docker: docker, flowID: 42}

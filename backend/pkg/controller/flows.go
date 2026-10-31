@@ -696,7 +696,45 @@ func (fc *flowController) GetFlow(ctx context.Context, flowID int64) (FlowWorker
 func (fc *flowController) StopFlow(ctx context.Context, flowID int64) error {
 	entry, flow, ok := fc.claim(ctx, flowID)
 	if !ok {
-		return fc.missingFlowError(ctx, flowID)
+		_, loaded, err := fc.lockSettled(ctx, flowID)
+		if err != nil {
+			return err
+		}
+		if loaded {
+			fc.mx.Unlock()
+			return fc.missingFlowError(ctx, flowID)
+		}
+		reserved := newFlowEntry()
+		reserved.closing = true
+		reserved.done = make(chan struct{})
+		fc.flows[flowID] = reserved
+		fc.mx.Unlock()
+		defer func() {
+			fc.unregister(flowID, reserved)
+			close(reserved.done)
+		}()
+
+		// Failed/stopped flows may have no worker after a restart.
+		state, err := fc.db.GetFlow(ctx, flowID)
+		if err != nil {
+			return fc.missingFlowError(ctx, flowID)
+		}
+		if state.Status != database.FlowStatusFailed && state.Status != database.FlowStatusStopped {
+			return fc.missingFlowError(ctx, flowID)
+		}
+		containers, err := fc.db.GetFlowContainers(ctx, flowID)
+		if err != nil {
+			return err
+		}
+		for _, c := range containers {
+			if c.LocalID.String != "" && c.Status != database.ContainerStatusStopped {
+				if err := fc.docker.StopContainer(ctx, c.LocalID.String, c.ID); err != nil {
+					return err
+				}
+			}
+		}
+		_, err = fc.db.UpdateFlowStatus(ctx, database.UpdateFlowStatusParams{ID: flowID, Status: database.FlowStatusStopped})
+		return err
 	}
 	defer entry.release()
 

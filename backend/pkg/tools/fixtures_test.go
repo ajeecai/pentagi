@@ -125,6 +125,8 @@ type fakeDockerClient struct {
 	copyFromErr     error
 	copyToErr       error
 
+	resumeErr error
+	resumed   []string
 	removeErr error
 	launchErr error
 
@@ -903,4 +905,12 @@ func fakeScraper(t *testing.T, target string, pages map[string]scraperAnswer) *h
 	t.Cleanup(ts.Close)
 
 	return ts
+}
+
+func (d *fakeDockerClient) ResumeContainer(ctx context.Context, id string, _ int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.resumed = append(d.resumed, id)
+	return d.resumeErr
 }
