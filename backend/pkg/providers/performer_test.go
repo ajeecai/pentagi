@@ -1074,3 +1074,30 @@ func TestPerformer_PerformAgentChain_WritesAMissingScopeToGraphitiAsADash(t *tes
 		})
 	}
 }
+
+type submissionBarrierExecutor struct {
+	performerBarrierExecutor
+	called []string
+}
+
+func (e *submissionBarrierExecutor) Execute(_ context.Context, _ int64, _ string, name string, _ string, _ string, _ json.RawMessage) (string, error) {
+	e.called = append(e.called, name)
+	return "Report accepted", nil
+}
+func TestPerformer_SubmittedReportSkipsRemainingCallsInSameReply(t *testing.T) {
+	calls := []llms.ToolCall{}
+	for i, name := range []string{tools.SubmitReportToolName, tools.CoderToolName, tools.SubmitReportToolName} {
+		calls = append(calls, llms.ToolCall{ID: fmt.Sprintf("call_%d", i), Type: "function", FunctionCall: &llms.FunctionCall{Name: name, Arguments: "{}"}})
+	}
+	prv := mock.NewProvider(provider.ProviderOpenAI, "openai", "gpt-5.6-sol")
+	prv.SetSequentialResponses(&llms.ContentResponse{Choices: []*llms.ContentChoice{{ToolCalls: calls}}})
+	fp := newFlowProvider()
+	fp.flowID = 42
+	fp.db = &performerScopeQuerier{}
+	fp.Provider = prv
+	fp.prompter = templates.NewDefaultPrompter()
+	ex := &submissionBarrierExecutor{performerBarrierExecutor: performerBarrierExecutor{barrier: tools.SubmitReportToolName}}
+	taskID, subtaskID := int64(7), int64(11)
+	require.NoError(t, fp.performAgentChain(t.Context(), pconfig.OptionsTypePrimaryAgent, 1, &taskID, &subtaskID, nil, ex, nil))
+	require.Equal(t, []string{tools.SubmitReportToolName}, ex.called)
+}

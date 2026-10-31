@@ -234,16 +234,17 @@ type FlowManagerHandlers struct {
 }
 
 type PrimaryExecutorConfig struct {
-	TaskID     int64
-	SubtaskID  int64
-	Barrier    ExecutorHandler
-	Adviser    ExecutorHandler
-	Coder      ExecutorHandler
-	Installer  ExecutorHandler
-	Memorist   ExecutorHandler
-	Pentester  ExecutorHandler
-	Searcher   ExecutorHandler
-	Summarizer SummarizeHandler
+	ReportSubmitted func()
+	TaskID          int64
+	SubtaskID       int64
+	Barrier         ExecutorHandler
+	Adviser         ExecutorHandler
+	Coder           ExecutorHandler
+	Installer       ExecutorHandler
+	Memorist        ExecutorHandler
+	Pentester       ExecutorHandler
+	Searcher        ExecutorHandler
+	Summarizer      SummarizeHandler
 }
 
 type InstallerExecutorConfig struct {
@@ -1076,6 +1077,23 @@ func (fte *flowToolsExecutor) GetPrimaryExecutor(cfg PrimaryExecutorConfig) (Con
 			FinalyToolName: {},
 		},
 		summarizer: cfg.Summarizer,
+	}
+
+	if cfg.ReportSubmitted != nil {
+		ce.definitions = append(ce.definitions, registryDefinitions[SubmitReportToolName])
+		ce.handlers[SubmitReportToolName] = func(ctx context.Context, _ string, args json.RawMessage) (string, error) {
+			receipt, err := fte.submitReport(ctx, cfg.TaskID, cfg.SubtaskID, args)
+			var invalid reportValidationError
+			if errors.As(err, &invalid) {
+				return "Report rejected: " + err.Error() + ". Fix the file and call submit_report again.", nil
+			}
+			if err != nil {
+				return "", err
+			}
+			ce.barriers[SubmitReportToolName] = struct{}{}
+			cfg.ReportSubmitted()
+			return "Report accepted: " + receipt.Path + " (sha256: " + receipt.SHA256 + "). Task complete; no further verification is required.", nil
+		}
 	}
 
 	if fte.cfg.AskUser {

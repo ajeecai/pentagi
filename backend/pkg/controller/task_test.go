@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -311,3 +314,94 @@ func TestTask_Report_RefusesACompletedTaskWithASentinel(t *testing.T) {
 	// Every other field is nil, so a guard that fired after touching one would panic.
 	assert.ErrorIs(t, tw.Report(context.Background()), ErrTaskAlreadyCompleted)
 }
+
+type reportTaskDB struct {
+	database.Querier
+	logs []database.Msglog
+	task database.Task
+}
+
+func (d *reportTaskDB) GetTaskMsgLogs(context.Context, sql.NullInt64) ([]database.Msglog, error) {
+	return d.logs, nil
+}
+func (d *reportTaskDB) UpdateTaskResult(_ context.Context, p database.UpdateTaskResultParams) (database.Task, error) {
+	d.task.Result = p.Result
+	return d.task, nil
+}
+func (d *reportTaskDB) UpdateTaskStatus(_ context.Context, p database.UpdateTaskStatusParams) (database.Task, error) {
+	d.task.Status = p.Status
+	return d.task, nil
+}
+func (d *reportTaskDB) GetTaskSubtasks(context.Context, int64) ([]database.Subtask, error) {
+	return []database.Subtask{{ID: 99, Status: database.SubtaskStatusCreated}}, nil
+}
+
+type reportSubtask struct {
+	SubtaskWorker
+	done   bool
+	runs   int
+	submit func()
+}
+
+func (s *reportSubtask) IsCompleted() bool            { return s.done }
+func (s *reportSubtask) Finish(context.Context) error { s.done = true; return nil }
+func (s *reportSubtask) Run(context.Context) error    { s.runs++; s.submit(); s.done = true; return nil }
+
+type reportSubtasks struct {
+	SubtaskController
+	first, planned *reportSubtask
+	refined        int
+}
+
+func (s *reportSubtasks) ListSubtasks(context.Context) []SubtaskWorker {
+	return []SubtaskWorker{s.first, s.planned}
+}
+func (s *reportSubtasks) PopSubtask(context.Context, TaskUpdater) (SubtaskWorker, error) {
+	return s.first, nil
+}
+func (s *reportSubtasks) RefineSubtasks(context.Context) error {
+	s.refined++
+	panic("accepted report must not be replanned")
+}
+
+type reportUpdater struct{}
+
+func (reportUpdater) SetStatus(context.Context, database.FlowStatus) error { return nil }
+
+func TestTaskAcceptedReportSkipsPlanningAndReporter(t *testing.T) {
+	for _, resumed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "submit during execution", true: "resume saved receipt"}[resumed], func(t *testing.T) {
+			db := &reportTaskDB{}
+			content := "# Accepted report"
+			sum := sha256.Sum256([]byte(content))
+			metadata, _ := json.Marshal(map[string]any{"path": "/work/report.md", "sha256": fmt.Sprintf("%x", sum)})
+			submit := func() {
+				db.logs = []database.Msglog{{FlowID: 7, TaskID: sql.NullInt64{Int64: 11, Valid: true}, Type: database.MsglogTypeReport, Message: tools.SubmittedReportPrefix + string(metadata), Result: content}}
+			}
+			if resumed {
+				submit()
+			}
+			subtasks := &reportSubtasks{first: &reportSubtask{submit: submit}, planned: &reportSubtask{}}
+			w := &taskWorker{mx: &sync.RWMutex{}, stc: subtasks, updater: reportUpdater{}, taskCtx: &TaskContext{TaskID: 11, FlowContext: FlowContext{FlowID: 7, DB: db, Publisher: &cascadeFakePublisher{}}}}
+			require.NoError(t, w.Run(t.Context()))
+			require.Equal(t, database.TaskStatusFinished, db.task.Status)
+			require.Equal(t, content, db.task.Result)
+			require.True(t, subtasks.planned.done)
+			require.Zero(t, subtasks.planned.runs)
+			require.Zero(t, subtasks.refined)
+			if resumed {
+				require.Zero(t, subtasks.first.runs)
+			} else {
+				require.Equal(t, 1, subtasks.first.runs)
+			}
+		})
+	}
+}
+
+func (d *reportTaskDB) DeleteSubtasks(_ context.Context, ids []int64) error {
+	if len(ids) != 1 || ids[0] != 99 {
+		panic("wrong pending subtask deleted")
+	}
+	return nil
+}
+func (s *reportSubtasks) InvalidateSubtasks(ids []int64) {}

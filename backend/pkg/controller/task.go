@@ -341,6 +341,13 @@ func (tw *taskWorker) PutInput(ctx context.Context, input string) error {
 func (tw *taskWorker) Run(ctx context.Context) error {
 	ctx = tools.PutAgentContext(ctx, database.MsgchainTypePrimaryAgent)
 
+	if submitted, err := tw.finishSubmittedReport(ctx); err != nil || submitted {
+		if err != nil {
+			tw.handleInterrupting(err)
+		}
+		return err
+	}
+
 	for len(tw.stc.ListSubtasks(ctx)) < providers.TasksNumberLimit+3 {
 		st, err := tw.stc.PopSubtask(ctx, tw)
 		if err != nil {
@@ -363,6 +370,13 @@ func (tw *taskWorker) Run(ctx context.Context) error {
 			return nil
 		} // otherwise subtask is done
 
+		if submitted, err := tw.finishSubmittedReport(ctx); err != nil || submitted {
+			if err != nil {
+				tw.handleInterrupting(err)
+			}
+			return err
+		}
+
 		if err := tw.stc.RefineSubtasks(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
 				ctx = context.Background()
@@ -373,6 +387,41 @@ func (tw *taskWorker) Run(ctx context.Context) error {
 	}
 
 	return tw.writeResult(ctx)
+}
+
+// The accepted snapshot survives a restart between delivery and task status updates.
+func (tw *taskWorker) finishSubmittedReport(ctx context.Context) (bool, error) {
+	receipt, err := tools.SubmittedReportForTask(ctx, tw.taskCtx.DB, tw.taskCtx.FlowID, tw.taskCtx.TaskID)
+	if err != nil || receipt == nil {
+		return false, err
+	}
+	if err := tw.SetResult(ctx, receipt.Content); err != nil {
+		return false, err
+	}
+	// Drop unexecuted plans instead of recording them as successful checks.
+	subtasks, err := tw.taskCtx.DB.GetTaskSubtasks(ctx, tw.taskCtx.TaskID)
+	if err != nil {
+		return false, err
+	}
+	var pending []int64
+	for _, subtask := range subtasks {
+		if subtask.Status == database.SubtaskStatusCreated {
+			pending = append(pending, subtask.ID)
+		}
+	}
+	if len(pending) > 0 {
+		if err := tw.taskCtx.DB.DeleteSubtasks(ctx, pending); err != nil {
+			return false, err
+		}
+		tw.stc.InvalidateSubtasks(pending)
+	}
+	if err := tw.finishOutstandingSubtasks(ctx); err != nil {
+		return false, err
+	}
+	if err := tw.SetStatus(ctx, database.TaskStatusFinished); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // writeResult asks the reporter for the task's write-up and publishes it: the

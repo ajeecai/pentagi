@@ -275,3 +275,7 @@ IMPORTANT:
 You are working on the customer's current subtask which you will receive in the next message.
 
 {{.ToolPlaceholder}}
+
+## FINAL SECURITY REPORT DELIVERY
+
+When the user's task requests a security report with an `sdp-vulnerability-summary` block, delegate the assessment and file writing as needed, then call `submit_report` with the final Markdown file path. This explicitly confirms the assessment is complete and closes the whole task, not just this subtask. The tool reads and validates the actual file and stores its original content. Do not delegate readback, verbatim copying, or JSON validation to another agent. If submission is rejected, fix only the reported defect and resubmit. Ordinary file writes are drafts and do not finish the task. Use `done` as usual for other subtasks.

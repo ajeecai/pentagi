@@ -205,12 +205,22 @@ func (fp *flowProvider) performAgentChain(
 			return err
 		}
 
+		reportSubmitted := false
 		for idx, toolCall := range result.funcCalls {
 			if toolCall.FunctionCall == nil {
 				continue
 			}
 
 			funcName := toolCall.FunctionCall.Name
+			if reportSubmitted {
+				chain = append(chain, llms.MessageContent{Role: llms.ChatMessageTypeTool, Parts: []llms.ContentPart{llms.ToolCallResponse{
+					ToolCallID: toolCall.ID, Name: funcName, Content: "Not executed: the final report was accepted and the task is complete.",
+				}}})
+				if err := fp.updateMsgChain(ctx, optAgentType, chainID, chain, rollLastUpdateTime()); err != nil {
+					return err
+				}
+				continue
+			}
 			response, err := fp.execToolCall(
 				ctx, optAgentType, chainID, idx, result, monitor, detector, executor, taskID, subtaskID, chain,
 			)
@@ -246,6 +256,7 @@ func (fp *flowProvider) performAgentChain(
 
 			if executor.IsBarrierFunction(funcName) {
 				wantToStop = true
+				reportSubmitted = funcName == tools.SubmitReportToolName
 			}
 		}
 

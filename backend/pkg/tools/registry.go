@@ -97,6 +97,7 @@ func GetToolType(name string) ToolType {
 
 var toolsTypeMapping = map[string]ToolType{
 	FinalyToolName:             BarrierToolType,
+	SubmitReportToolName:       BarrierToolType,
 	AskUserToolName:            BarrierToolType,
 	MaintenanceToolName:        AgentToolType,
 	MaintenanceResultToolName:  StoreAgentResultToolType,
@@ -404,6 +405,11 @@ var registryDefinitions = map[string]llms.FunctionDefinition{
 		Name:        AskUserToolName,
 		Description: "If you need to ask user for input, use this tool",
 		Parameters:  reflector.Reflect(&AskUser{}),
+	},
+	SubmitReportToolName: {
+		Name:        SubmitReportToolName,
+		Description: "Submit the final security report file and finish the entire task. Call only when the assessment is complete. Validates and stores the original file without asking another agent to read or reproduce it. On rejection, fix the specified defect and resubmit. On acceptance no further planning or report review runs.",
+		Parameters:  reflector.Reflect(&SubmitReportAction{}),
 	},
 	FinalyToolName: {
 		Name:        FinalyToolName,

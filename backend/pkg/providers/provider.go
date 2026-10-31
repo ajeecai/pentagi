@@ -794,14 +794,15 @@ func (fp *flowProvider) PerformAgentChain(ctx context.Context, taskID, subtaskID
 
 	performResult := PerformResultError
 	cfg := tools.PrimaryExecutorConfig{
-		TaskID:    taskID,
-		SubtaskID: subtaskID,
-		Adviser:   adviser,
-		Coder:     coder,
-		Installer: installer,
-		Memorist:  memorist,
-		Pentester: pentester,
-		Searcher:  searcher,
+		ReportSubmitted: func() { performResult = PerformResultDone },
+		TaskID:          taskID,
+		SubtaskID:       subtaskID,
+		Adviser:         adviser,
+		Coder:           coder,
+		Installer:       installer,
+		Memorist:        memorist,
+		Pentester:       pentester,
+		Searcher:        searcher,
 		Barrier: func(ctx context.Context, name string, args json.RawMessage) (string, error) {
 			loggerFunc := logger.WithContext(ctx).WithFields(logrus.Fields{
 				"name": name,
