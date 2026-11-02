@@ -318,16 +318,6 @@ func (c *creatingController) waitUntilSettled(t *testing.T) {
 	}, 5*time.Second, time.Millisecond, "the flow never finished preparing")
 }
 
-// finishWhilePreparing fails, rather than hangs, when FinishFlow waits for a build still holding the flow.
-func (c *creatingController) finishWhilePreparing(t *testing.T) {
-	t.Helper()
-
-	finished := make(chan error, 1)
-	go func() { finished <- c.fc.FinishFlow(context.Background(), reservedFlowID) }()
-
-	require.NoError(t, controllerReceive(t, finished, "finishing a flow whose sandbox is still being prepared"))
-}
-
 func (c *creatingController) registered() bool {
 	c.fc.mx.Lock()
 	defer c.fc.mx.Unlock()
@@ -420,18 +410,58 @@ func TestFlows_FailFlow_RecordsWhyAndMarksTheFlowFailed(t *testing.T) {
 	assert.Equal(t, flowID, messages[0].FlowID)
 }
 
-func TestFlows_FinishFlow_CancelsAPreparationWithoutWaitingForIt(t *testing.T) {
+func TestFlows_FinishFlow_WaitsForCancelledPreparationCleanup(t *testing.T) {
 	c := newCreatingController(t, nil)
 	c.holdsAfterCancel = true
-
 	c.create(t)
 	c.waitForPreparation(t)
-	c.finishWhilePreparing(t)
-
-	controllerReceive(t, c.cancelled, "the preparation of a closed flow to stop calling its provider")
+	finished := make(chan error, 1)
+	go func() { finished <- c.fc.FinishFlow(context.Background(), reservedFlowID) }()
+	controllerReceive(t, c.cancelled, "cancelling preparation")
+	select {
+	case <-finished:
+		t.Fatal("cancellation returned before preparation released its resources")
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Empty(t, c.q.recordedStatuses())
 	close(c.release)
-	c.waitUntilSettled(t)
-	assert.False(t, c.registered(), "a flow finished while preparing does not stay in the registry")
+	require.NoError(t, controllerReceive(t, finished, "finishing after preparation cleanup"))
+	assert.False(t, c.registered())
+}
+
+func TestFlows_FinishFlow_CancelsBeforePreparationStarts(t *testing.T) {
+	c := newCreatingController(t, nil)
+	flow := database.Flow{ID: reservedFlowID, UserID: 1, Status: database.FlowStatusCreated}
+	c.q.flow = flow
+	entry, installed := c.fc.reserveEntry(flow.ID)
+	require.True(t, installed)
+	finished := make(chan error, 1)
+	go func() { finished <- c.fc.FinishFlow(context.Background(), flow.ID) }()
+	require.Eventually(t, func() bool {
+		c.fc.mx.Lock()
+		defer c.fc.mx.Unlock()
+		return entry.closing
+	}, time.Second, time.Millisecond)
+	c.fc.prepareFlow(context.Background(), entry, flow, func(ctx context.Context, _ func() error) (FlowWorker, error) {
+		require.ErrorIs(t, ctx.Err(), context.Canceled)
+		return nil, ctx.Err()
+	})
+	require.NoError(t, controllerReceive(t, finished, "cancellation before preparation started"))
+	assert.False(t, c.registered())
+}
+
+func TestFlows_FinishFlow_PreparationTimeoutAllowsRetry(t *testing.T) {
+	c := newCreatingController(t, nil)
+	c.holdsAfterCancel = true
+	c.create(t)
+	c.waitForPreparation(t)
+	err := c.fc.finishFlowWithin(context.Background(), reservedFlowID, 20*time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Empty(t, c.q.recordedStatuses())
+	assert.True(t, c.registered())
+	close(c.release)
+	require.NoError(t, c.fc.FinishFlow(context.Background(), reservedFlowID))
+	assert.False(t, c.registered())
 }
 
 func TestFlows_CreateAssistant_AnswersFirstAndFailsTheAssistantOfAFlowThatCannotStart(t *testing.T) {
@@ -528,8 +558,15 @@ func TestFlows_CommitPreparation_RefusesAFlowClosedBeforeTheCommit(t *testing.T)
 
 	c.create(t)
 	c.waitForPreparation(t)
-	c.finishWhilePreparing(t)
+	finished := make(chan error, 1)
+	go func() { finished <- c.fc.FinishFlow(context.Background(), reservedFlowID) }()
+	require.Eventually(t, func() bool {
+		c.fc.mx.Lock()
+		defer c.fc.mx.Unlock()
+		return c.fc.flows[reservedFlowID].closing
+	}, time.Second, time.Millisecond)
 	close(c.release)
+	require.NoError(t, controllerReceive(t, finished, "finishing cancelled preparation"))
 
 	assert.ErrorIs(t, controllerReceive(t, c.committed, "the build to reach its commit point"), errFlowAbandoned,
 		"a build not told the flow is gone starts the sandbox and runs its input")
@@ -582,8 +619,15 @@ func TestFlows_PrepareFlow_FinishesTheWorkerOfAnAbandonedPreparationOnALiveConte
 
 	c.create(t)
 	c.waitForPreparation(t)
-	c.finishWhilePreparing(t)
+	finished := make(chan error, 1)
+	go func() { finished <- c.fc.FinishFlow(context.Background(), reservedFlowID) }()
+	require.Eventually(t, func() bool {
+		c.fc.mx.Lock()
+		defer c.fc.mx.Unlock()
+		return c.fc.flows[reservedFlowID].closing
+	}, time.Second, time.Millisecond)
 	close(c.release)
+	require.NoError(t, controllerReceive(t, finished, "finishing cancelled preparation"))
 
 	assert.NoError(t, controllerReceive(t, c.finishing.seen, "the worker of the abandoned preparation to be finished"),
 		"a worker finished on a cancelled context keeps its sandbox")

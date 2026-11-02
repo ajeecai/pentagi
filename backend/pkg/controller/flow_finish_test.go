@@ -78,31 +78,13 @@ func TestFlowFinish_FinishUnloadedFlow_ClosesTheFlowAndWhatItLeftOpen(t *testing
 		assert.Equal(t, database.FlowStatusFinished, pub.flowUpdated[0].Status)
 	})
 
-	t.Run("a container query that fails once is read again for the event", func(t *testing.T) {
-		t.Parallel()
-
-		q := newQuerier()
-		q.containersErr = errors.New("containers are unreadable")
-		q.containersErrOnce = true
-		pub, dkr, err := finish(q, nil)
-
-		require.NoError(t, err)
-		require.Len(t, pub.flowUpdated, 1, "the subscriber learns the flow is finished")
-		assert.Equal(t, database.FlowStatusFinished, pub.flowUpdated[0].Status)
-		assert.Len(t, pub.flowTerms[0], 2, "the event carries the terminals the flow still has")
-		assert.Empty(t, dkr.removed, "the failed read left nothing to release")
-	})
-
-	t.Run("a container query that keeps failing publishes no event", func(t *testing.T) {
-		t.Parallel()
-
+	t.Run("an unreadable container list prevents successful cancellation", func(t *testing.T) {
 		q := newQuerier()
 		q.containersErr = errors.New("containers are unreadable")
 		pub, _, err := finish(q, nil)
-
-		require.NoError(t, err)
-		assert.Equal(t, finished, q.flowStatus, "the row is still closed")
-		assert.Empty(t, pub.flowUpdated, "an event with no terminals would wipe the terminals an open tab shows")
+		require.ErrorIs(t, err, q.containersErr)
+		assert.Empty(t, q.flowStatus)
+		assert.Empty(t, pub.flowUpdated)
 	})
 
 	t.Run("a failed assistant close does not keep the flow open", func(t *testing.T) {
@@ -118,15 +100,16 @@ func TestFlowFinish_FinishUnloadedFlow_ClosesTheFlowAndWhatItLeftOpen(t *testing
 		assert.Empty(t, pub.assistantUpdated)
 	})
 
-	t.Run("a failed purge does not keep the flow open", func(t *testing.T) {
-		t.Parallel()
-
+	t.Run("a failed purge prevents success and can be retried", func(t *testing.T) {
 		q := newQuerier()
-		pub, _, err := finish(q, errors.New("docker is down"))
-
-		require.NoError(t, err)
+		fc, pub, dkr := newFinishController(q)
+		dkr.err = errors.New("docker is down")
+		require.ErrorIs(t, fc.FinishFlow(context.Background(), flowID), dkr.err)
+		assert.Empty(t, q.flowStatus)
+		assert.Empty(t, pub.flowUpdated)
+		dkr.err = nil
+		require.NoError(t, fc.FinishFlow(context.Background(), flowID))
 		assert.Equal(t, finished, q.flowStatus)
-		assert.Len(t, pub.flowUpdated, 1)
 	})
 
 	t.Run("a missing row is reported as not found", func(t *testing.T) {
@@ -172,7 +155,7 @@ func (d *budgetEatingDocker) RemoveContainer(ctx context.Context, _ string, _ in
 	return ctx.Err()
 }
 
-func TestFlowFinish_FinishUnloadedFlow_RecordsTheFlowBeforeTheSandboxSpendsTheBudget(t *testing.T) {
+func TestFlowFinish_FinishUnloadedFlow_RejectsIncompleteCleanup(t *testing.T) {
 	t.Parallel()
 
 	const flowID = int64(7)
@@ -190,11 +173,9 @@ func TestFlowFinish_FinishUnloadedFlow_RecordsTheFlowBeforeTheSandboxSpendsTheBu
 	fc, _, _ := newFinishController(q)
 	fc.docker = dkr
 
-	require.NoError(t, fc.finishFlowWithin(context.Background(), flowID, 50*time.Millisecond))
-
-	require.Equal(t, int64(1), dkr.removed.Load(), "the sandbox teardown is still attempted")
-	assert.Equal(t, []database.UpdateFlowStatusParams{{Status: database.FlowStatusFinished, ID: flowID}}, q.flowStatus,
-		"a sandbox that outlives the budget does not keep the flow open")
+	require.ErrorIs(t, fc.finishFlowWithin(context.Background(), flowID, 50*time.Millisecond), context.DeadlineExceeded)
+	require.Equal(t, int64(1), dkr.removed.Load())
+	assert.Empty(t, q.flowStatus, "cleanup timeout must not be reported as completion")
 }
 
 func TestFlowFinish_MissingFlowError_AnswersNotFoundOnlyForAFlowTheDatabaseLacks(t *testing.T) {

@@ -257,6 +257,7 @@ type containerRecorder struct {
 	row      database.Container
 	created  database.CreateContainerParams
 	statuses []database.ContainerStatus
+	onUpdate func(database.UpdateContainerStatusLocalIDParams) error
 	images   []string
 }
 
@@ -296,6 +297,11 @@ func (r *containerRecorder) UpdateContainerStatusLocalID(
 ) (database.Container, error) {
 	if err := ctx.Err(); err != nil {
 		return database.Container{}, err
+	}
+	if r.onUpdate != nil {
+		if err := r.onUpdate(arg); err != nil {
+			return database.Container{}, err
+		}
 	}
 	r.statuses = append(r.statuses, arg.Status)
 	r.row.Status = arg.Status
@@ -476,7 +482,7 @@ func TestClient_RunContainer_AppliesSandboxDefaults(t *testing.T) {
 
 	require.Equal(t, database.ContainerStatusStarting, recorder.created.Status)
 	require.Equal(t, database.ContainerTypePrimary, recorder.created.Type)
-	require.Equal(t, []database.ContainerStatus{database.ContainerStatusRunning}, recorder.statuses)
+	require.Equal(t, []database.ContainerStatus{database.ContainerStatusStarting, database.ContainerStatusRunning}, recorder.statuses)
 	require.Equal(t, inspect.ID, row.LocalID.String)
 	require.Equal(t, database.ContainerStatusRunning, row.Status)
 
@@ -646,7 +652,7 @@ func TestClient_RunContainer_MarksTheRowFailedWhenTheStartFails(t *testing.T) {
 	_, err = dc.RunContainer(t.Context(), name, database.ContainerTypePrimary, flowID, probeConfig(), nil)
 
 	require.ErrorContains(t, err, "failed to start container")
-	require.Equal(t, []database.ContainerStatus{database.ContainerStatusFailed}, recorder.statuses)
+	require.Equal(t, []database.ContainerStatus{database.ContainerStatusStarting, database.ContainerStatusFailed}, recorder.statuses)
 	require.NotEmpty(t, recorder.row.LocalID.String)
 
 	_, inspectErr := dc.client.ContainerInspect(t.Context(), name, client.ContainerInspectOptions{})
@@ -689,7 +695,7 @@ func TestClient_RunContainer_RejectsAContainerThatDoesNotStayRunning(t *testing.
 			require.Equal(t, test.exitCode, startupErr.ExitCode)
 			require.Contains(t, startupErr.LogTail, "startup-diagnostic")
 
-			require.Equal(t, []database.ContainerStatus{database.ContainerStatusFailed}, recorder.statuses)
+			require.Equal(t, []database.ContainerStatus{database.ContainerStatusStarting, database.ContainerStatusFailed}, recorder.statuses)
 
 			_, inspectErr := dc.client.ContainerInspect(t.Context(), name, client.ContainerInspectOptions{})
 			require.True(t, cerrdefs.IsNotFound(inspectErr),
@@ -953,4 +959,41 @@ func TestClient_RunContainer_UsesOnlyItsTenantSidecarNetwork(t *testing.T) {
 	require.Empty(t, config.ExposedPorts)
 	require.Empty(t, inspect.HostConfig.PortBindings)
 	require.Empty(t, inspect.NetworkSettings.Networks, "the worker must not join a second bridge network")
+}
+
+func TestClient_RunContainer_CleansUpCancelledOrUnrecordedStarts(t *testing.T) {
+	for _, scenario := range []string{"cancel", "starting write fails", "running write fails"} {
+		t.Run(scenario, func(t *testing.T) {
+			dc, recorder := newRunContainerClient(t)
+			name := probeName(t)
+			cleanupProbeContainer(t, dc, name)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var realID string
+			recorder.onUpdate = func(arg database.UpdateContainerStatusLocalIDParams) error {
+				if arg.Status == database.ContainerStatusStarting {
+					realID = arg.LocalID.String
+					require.NotContains(t, realID, "tmp-id-")
+					if scenario == "cancel" {
+						cancel()
+					}
+				}
+				if (scenario == "starting write fails" && arg.Status == database.ContainerStatusStarting) ||
+					(scenario == "running write fails" && arg.Status == database.ContainerStatusRunning) {
+					return errors.New("database write rejected")
+				}
+				return nil
+			}
+			_, err := dc.RunContainer(ctx, name, database.ContainerTypePrimary, 71, probeConfig(), nil)
+			require.Error(t, err)
+			require.Equal(t, name, recorder.created.LocalID.String)
+			require.NotEmpty(t, realID)
+			_, err = dc.client.ContainerInspect(t.Context(), realID, client.ContainerInspectOptions{})
+			require.True(t, cerrdefs.IsNotFound(err), "failed startup left a Docker container: %v", err)
+			if scenario == "cancel" {
+				require.Equal(t, realID, recorder.row.LocalID.String)
+				require.Equal(t, database.ContainerStatusFailed, recorder.row.Status)
+			}
+		})
+	}
 }
