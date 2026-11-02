@@ -274,27 +274,33 @@ func (dc *dockerClient) RunContainer(
 	logger.Info("running container")
 
 	dbContainer, err := dc.db.CreateContainer(ctx, database.CreateContainerParams{
-		Type:     containerType,
-		Name:     containerName,
-		Image:    config.Image,
-		Status:   database.ContainerStatusStarting,
-		FlowID:   flowID,
-		LocalID:  database.StringToNullString(fmt.Sprintf("tmp-id-%d", flowID)),
+		Type:   containerType,
+		Name:   containerName,
+		Image:  config.Image,
+		Status: database.ContainerStatusStarting,
+		FlowID: flowID,
+		// Docker accepts the name too, allowing cleanup if persisting the real ID fails.
+		LocalID:  database.StringToNullString(containerName),
 		LocalDir: database.StringToNullString(hostDir),
 	})
 	if err != nil {
 		return database.Container{}, fmt.Errorf("failed to create container in database: %w", err)
 	}
 
-	updateContainerInfo := func(status database.ContainerStatus, localID string) {
-		dbContainer, err = dc.db.UpdateContainerStatusLocalID(ctx, database.UpdateContainerStatusLocalIDParams{
+	updateContainerInfo := func(status database.ContainerStatus, localID string) error {
+		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), containerDiscardTimeout)
+		defer cancel()
+		updated, updateErr := dc.db.UpdateContainerStatusLocalID(updateCtx, database.UpdateContainerStatusLocalIDParams{
 			Status:  status,
 			LocalID: database.StringToNullString(localID),
 			ID:      dbContainer.ID,
 		})
-		if err != nil {
-			logger.WithError(err).Error("failed to update container info in database")
+		if updateErr != nil {
+			logger.WithError(updateErr).Error("failed to update container info in database")
+			return fmt.Errorf("failed to update container info in database: %w", updateErr)
 		}
+		dbContainer = updated
+		return nil
 	}
 
 	fallbackDockerImage := func() error {
@@ -498,6 +504,10 @@ func (dc *dockerClient) RunContainer(
 	containerID := resp.ID
 	logger = logger.WithField("local_id", containerID)
 	logger.Info("container created")
+	if err := updateContainerInfo(database.ContainerStatusStarting, containerID); err != nil {
+		dc.discardContainer(ctx, containerID, logger)
+		return database.Container{}, err
+	}
 
 	// Arm the exit watch before starting. The restart policy replaces a container
 	// that dies with a fresh attempt within milliseconds, and from then on the
@@ -528,7 +538,10 @@ func (dc *dockerClient) RunContainer(
 		return database.Container{}, err
 	}
 	logger.Info("container started")
-	updateContainerInfo(database.ContainerStatusRunning, containerID)
+	if err := updateContainerInfo(database.ContainerStatusRunning, containerID); err != nil {
+		dc.discardContainer(ctx, containerID, logger)
+		return database.Container{}, err
+	}
 
 	return dbContainer, nil
 }

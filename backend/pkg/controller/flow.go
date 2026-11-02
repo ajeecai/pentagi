@@ -276,6 +276,7 @@ func buildFlowWorker(
 		TermLog:    workers.tlw,
 		Screenshot: workers.sw,
 	}
+	prepareCtx := ctx
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, _ = obs.Observer.NewObservation(ctx, langfuse.WithObservationTraceID(observation.TraceID()))
 	fw := &flowWorker{
@@ -301,7 +302,8 @@ func buildFlowWorker(
 		}),
 	}
 
-	if err := executor.Prepare(ctx); err != nil {
+	if err := executor.Prepare(prepareCtx); err != nil {
+		cancel()
 		return nil, wrapErrorEndSpan(ctx, flowSpan, "failed to prepare flow resources", err)
 	}
 

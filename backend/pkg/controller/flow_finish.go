@@ -44,6 +44,11 @@ func (fc *flowController) finishUnloadedFlow(ctx context.Context, flowID int64) 
 
 	fc.finishFlowAssistants(ctx, flowID, publisher)
 
+	containers, err := fc.releaseFlowContainers(ctx, flowID)
+	if err != nil {
+		return err
+	}
+
 	closed := flow.Status == database.FlowStatusFinished || flow.Status == database.FlowStatusFailed
 
 	var finished database.Flow
@@ -62,19 +67,8 @@ func (fc *flowController) finishUnloadedFlow(ctx context.Context, flowID int64) 
 		}).Warn("finished a flow whose worker was never loaded")
 	}
 
-	containers, containersErr := fc.releaseFlowContainers(ctx, flowID)
-
 	if closed {
 		return nil
-	}
-
-	if containersErr != nil {
-		containers, containersErr = fc.db.GetFlowContainers(ctx, flowID)
-		if containersErr != nil {
-			logrus.WithContext(ctx).WithError(containersErr).
-				Warnf("failed to read containers of flow %d twice, skipping its update event", flowID)
-			return nil
-		}
 	}
 
 	publisher.FlowUpdated(ctx, finished, containers)
@@ -120,11 +114,12 @@ func (fc *flowController) releaseFlowContainers(
 	containers, err := fc.db.GetFlowContainers(ctx, flowID)
 	if err != nil {
 		logrus.WithContext(ctx).WithError(err).
-			Warnf("failed to get containers of flow %d, finishing it without releasing them", flowID)
+			Warnf("failed to get containers of flow %d for cleanup", flowID)
 		return nil, err
 	}
 
 	released := false
+	var releaseErr error
 	for _, container := range containers {
 		if container.Status == database.ContainerStatusDeleted || !container.LocalID.Valid {
 			continue
@@ -133,21 +128,22 @@ func (fc *flowController) releaseFlowContainers(
 		if err := fc.docker.RemoveContainer(ctx, container.LocalID.String, container.ID); err != nil {
 			logrus.WithContext(ctx).WithError(err).
 				Warnf("failed to release container %d of flow %d", container.ID, flowID)
+			releaseErr = errors.Join(releaseErr, err)
 			continue
 		}
 		released = true
 	}
 
 	if !released {
-		return containers, nil
+		return containers, releaseErr
 	}
 
 	updated, err := fc.db.GetFlowContainers(ctx, flowID)
 	if err != nil {
-		return containers, nil
+		return containers, releaseErr
 	}
 
-	return updated, nil
+	return updated, releaseErr
 }
 
 func (fc *flowController) finishFlowLeftovers(ctx context.Context, flowID int64) error {

@@ -94,8 +94,7 @@ type flowEntry struct {
 	committed bool
 	abort     context.CancelFunc
 
-	// done is closed once the teardown of an unloaded flow has ended and its
-	// slot is gone; it is nil on a slot that holds a worker or a preparation.
+	// done serializes teardown attempts, including cancellation during preparation.
 	done chan struct{}
 }
 
@@ -318,9 +317,12 @@ func (fc *flowController) prepareFlow(
 
 	fc.mx.Lock()
 	entry.abort = cancel
+	if entry.closing {
+		cancel()
+	}
 	fc.mx.Unlock()
 
-	entry.lock()
+	// reserveEntry holds the lifecycle slot before this goroutine can start.
 	defer entry.release()
 
 	worker, err := build(ctx, func() error { return fc.commitPreparation(entry) })
@@ -330,7 +332,7 @@ func (fc *flowController) prepareFlow(
 	entry.preparing = false
 	entry.worker = worker
 	abandoned := !entry.committed && (entry.closing || fc.flows[flow.ID] != entry)
-	if err != nil || abandoned {
+	if (err != nil || abandoned) && !entry.closing {
 		if fc.flows[flow.ID] == entry {
 			delete(fc.flows, flow.ID)
 		}
@@ -485,6 +487,14 @@ func (fc *flowController) flowForAssistant(
 		}, nil
 	}
 
+	fc.mx.Lock()
+	current := fc.flows[flowID]
+	closingWorker := current != nil && current.closing && current.worker != nil
+	fc.mx.Unlock()
+	if closingWorker {
+		return nil, 0, nil, ErrFlowNotFound
+	}
+
 	entry, loaded, err := fc.lockSettled(ctx, flowID)
 	if err != nil {
 		return nil, 0, nil, err
@@ -608,6 +618,7 @@ func (fc *flowController) reserveEntry(flowID int64) (*flowEntry, bool) {
 	}
 
 	entry := newFlowEntry()
+	entry.lock()
 	entry.preparing = true
 	fc.flows[flowID] = entry
 
@@ -776,12 +787,15 @@ func (fc *flowController) finishFlowWithin(ctx context.Context, flowID int64, bu
 		return fc.finishUnloadedFlow(unloadedCtx, flowID)
 	}
 
-	if entry.closing {
-		fc.mx.Unlock()
-		return nil
-	}
-
 	entry.closing = true
+	entry.done = make(chan struct{})
+	done := entry.done
+	defer func() {
+		fc.mx.Lock()
+		entry.done = nil
+		close(done)
+		fc.mx.Unlock()
+	}()
 	abandon := entry.preparing && !entry.committed
 	if abandon && entry.abort != nil {
 		entry.abort()
@@ -792,6 +806,11 @@ func (fc *flowController) finishFlowWithin(ctx context.Context, flowID int64, bu
 		preparingCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 		defer cancel()
 
+		if !entry.acquire(preparingCtx) {
+			return fmt.Errorf("flow %d preparation has not stopped: %w", flowID, preparingCtx.Err())
+		}
+		defer entry.release()
+		defer fc.unregister(flowID, entry)
 		return fc.finishUnloadedFlow(preparingCtx, flowID)
 	}
 
