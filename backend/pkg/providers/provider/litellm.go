@@ -116,7 +116,7 @@ type pricingInfo struct {
 func LoadModelsFromHTTP(baseURL, apiKey string, httpClient *http.Client, prefix string) (pconfig.ModelsConfig, error) {
 	modelsURL := strings.TrimRight(baseURL, "/") + "/models"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
